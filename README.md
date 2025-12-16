@@ -1,4 +1,4 @@
-# daily_motivator
+# project_axis_app
 
 A new Flutter project.
 
