@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:file_picker/file_picker.dart';
@@ -22,7 +23,6 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await NotificationService().init();
   runApp(
-    // CHANGED: Reverted back to MainShell immediately
     const MaterialApp(home: MainShell(), debugShowCheckedModeBanner: false),
   );
 }
@@ -44,13 +44,21 @@ class _MainShellState extends State<MainShell> {
   int _inventoryRefreshKey = 0;
   bool _triggerNightSurvey = false;
 
-  // Settings State
-  int _runoutThreshold = 7;
-  bool _runoutNotificationsEnabled = true;
+  // --- SETTINGS STATE ---
+  List<int> _runoutThresholds = [7];
+  bool _runoutVisualsEnabled = true;
 
-  // --- NOTIFICATION LOGIC ---
+  // Notification State
   bool _debriefEnabled = false;
   TimeOfDay _debriefTime = const TimeOfDay(hour: 21, minute: 0);
+
+  // Smart Alert State
+  bool _runoutNotifsEnabled = false;
+  bool _usageNotifsEnabled = false;
+  TimeOfDay _smartAlertTime = const TimeOfDay(hour: 8, minute: 0);
+
+  // --- APP VERSION STATE ---
+  final String _appVersion = "0.2.0";
 
   List<TabData> _tabs = [];
   final List<TabData> _allPossibleTabs = [
@@ -67,49 +75,181 @@ class _MainShellState extends State<MainShell> {
     _loadTabOrder();
     _loadSettings();
     _configureNotificationListener();
+    _checkLaunchPayload();
     NotificationService().requestPermissions();
 
-    // Trigger the gradient animation shortly after load
     Future.delayed(const Duration(milliseconds: 100), () {
       setState(() => _animateGradient = true);
     });
   }
 
-  void _configureNotificationListener() {
-    NotificationService().selectNotificationStream.stream.listen((
-      String? payload,
-    ) {
-      if (payload == 'night_debrief') {
-        int nightIndex = _tabs.indexWhere((t) => t.id == 'night');
-        if (nightIndex != -1) {
-          setState(() => _triggerNightSurvey = true);
-          _onTabTapped(nightIndex);
+  // --- LOGIC: REFRESH SMART ALERTS ---
+  Future<void> _refreshSmartNotifications() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final String? invString = prefs.getString('axis_inventory');
+    if (invString == null) return;
+    List<InventoryItem> items = (jsonDecode(invString) as List)
+        .map((e) => InventoryItem.fromJson(e))
+        .toList();
+
+    final List<String> logs = prefs.getStringList('axis_activity_log') ?? [];
+
+    for (var item in items) {
+      if (item.type == "Room") continue;
+
+      // --- CALCULATE USAGE RATE ---
+      final itemLogs = logs
+          .where((l) => l.contains("|USED|${item.name}|"))
+          .toList();
+      double calculatedRate = 0.0;
+
+      if (itemLogs.length >= 2) {
+        DateTime firstDate = DateTime.parse(itemLogs.first.split('|')[0]);
+        DateTime lastDate = DateTime.parse(itemLogs.last.split('|')[0]);
+
+        int daysDiff = lastDate.difference(firstDate).inDays;
+        if (daysDiff < 1) daysDiff = 1;
+
+        int totalUsed = 0;
+        for (var log in itemLogs) {
+          totalUsed += int.tryParse(log.split('|')[4]) ?? 0;
+        }
+
+        calculatedRate = totalUsed.abs() / daysDiff;
+      }
+
+      item.usageRate = calculatedRate;
+
+      // --- A. MULTI-STAGE RUNOUT ALERTS ---
+      if (_runoutNotifsEnabled && item.usageRate > 0) {
+        double currentDaysLeft = item.quantity / item.usageRate;
+
+        for (int threshold in _runoutThresholds) {
+          double daysUntilThreshold = currentDaysLeft - threshold;
+
+          if (daysUntilThreshold > 0) {
+            DateTime alertDate = DateTime.now().add(
+              Duration(days: daysUntilThreshold.floor()),
+            );
+
+            int id = item.name.hashCode + threshold;
+
+            await NotificationService().scheduleSmartAlert(
+              id: id,
+              title: "Low Stock: ${item.name}",
+              body: "You will run out in $threshold days.",
+              date: alertDate,
+              time: _smartAlertTime,
+              payload: 'inventory_alert',
+            );
+          }
         }
       }
+
+      // --- B. USAGE REMINDERS ---
+      if (_usageNotifsEnabled && item.usageRate > 0) {
+        int daysUntilNextUse = (1 / item.usageRate).round();
+        if (daysUntilNextUse < 1) daysUntilNextUse = 1;
+
+        DateTime usageDate = DateTime.now().add(
+          Duration(days: daysUntilNextUse),
+        );
+        int id = item.name.hashCode + 100000;
+
+        await NotificationService().scheduleSmartAlert(
+          id: id,
+          title: "Use Now: ${item.name}",
+          body: "Based on your habits, you should use this today.",
+          date: usageDate,
+          time: _smartAlertTime,
+          payload: 'inventory_alert',
+        );
+      }
+    }
+  }
+
+  void _handleNotificationPayload(String payload) async {
+    await Future.delayed(const Duration(milliseconds: 500));
+    if (!mounted) return;
+
+    if (payload == 'night_debrief') {
+      int idx = _tabs.indexWhere((t) => t.id == 'night');
+      if (idx != -1) {
+        setState(() {
+          _triggerNightSurvey = true;
+          _currentIndex = idx;
+        });
+        _onTabTapped(idx);
+      }
+    } else if (payload == 'inventory_alert') {
+      int idx = _tabs.indexWhere((t) => t.id == 'inventory');
+      if (idx != -1) {
+        setState(() => _currentIndex = idx);
+        _onTabTapped(idx);
+      }
+    }
+  }
+
+  void _configureNotificationListener() {
+    NotificationService().selectNotificationStream.stream.listen((payload) {
+      if (payload != null) _handleNotificationPayload(payload);
     });
   }
 
+  Future<void> _checkLaunchPayload() async {
+    final payload = await NotificationService().getLaunchPayload();
+    if (payload != null) _handleNotificationPayload(payload);
+  }
+
+  // --- SETTINGS LOADING ---
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _runoutThreshold = prefs.getInt('axis_runout_threshold') ?? 7;
-      _runoutNotificationsEnabled =
-          prefs.getBool('axis_runout_enabled') ?? true;
+      List<String>? savedThresholds = prefs.getStringList(
+        'axis_runout_thresholds',
+      );
+      if (savedThresholds != null && savedThresholds.isNotEmpty) {
+        _runoutThresholds = savedThresholds.map((e) => int.parse(e)).toList();
+      } else {
+        int oldSingle = prefs.getInt('axis_runout_threshold') ?? 7;
+        _runoutThresholds = [oldSingle];
+      }
+
+      _runoutVisualsEnabled = prefs.getBool('axis_runout_enabled') ?? true;
+
       _debriefEnabled = prefs.getBool('axis_debrief_enabled') ?? false;
       int h = prefs.getInt('axis_debrief_hour') ?? 21;
       int m = prefs.getInt('axis_debrief_minute') ?? 0;
       _debriefTime = TimeOfDay(hour: h, minute: m);
+
+      _runoutNotifsEnabled = prefs.getBool('axis_notif_runout') ?? false;
+      _usageNotifsEnabled = prefs.getBool('axis_notif_usage') ?? false;
+      int sh = prefs.getInt('axis_smart_hour') ?? 8;
+      int sm = prefs.getInt('axis_smart_minute') ?? 0;
+      _smartAlertTime = TimeOfDay(hour: sh, minute: sm);
     });
+
+    _refreshSmartNotifications();
   }
 
-  Future<void> _handleRunoutChange(int days, bool enabled) async {
+  // --- SETTINGS SAVING ---
+  Future<void> _handleRunoutSettings(
+    List<int> thresholds,
+    bool visualsEnabled,
+  ) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('axis_runout_threshold', days);
-    await prefs.setBool('axis_runout_enabled', enabled);
+
+    List<String> stringList = thresholds.map((e) => e.toString()).toList();
+    await prefs.setStringList('axis_runout_thresholds', stringList);
+
+    await prefs.setBool('axis_runout_enabled', visualsEnabled);
+
     setState(() {
-      _runoutThreshold = days;
-      _runoutNotificationsEnabled = enabled;
+      _runoutThresholds = thresholds;
+      _runoutVisualsEnabled = visualsEnabled;
     });
+    _refreshSmartNotifications();
   }
 
   Future<void> _handleDebriefChange(bool enabled, TimeOfDay time) async {
@@ -117,7 +257,6 @@ class _MainShellState extends State<MainShell> {
     await prefs.setBool('axis_debrief_enabled', enabled);
     await prefs.setInt('axis_debrief_hour', time.hour);
     await prefs.setInt('axis_debrief_minute', time.minute);
-
     setState(() {
       _debriefEnabled = enabled;
       _debriefTime = time;
@@ -128,6 +267,25 @@ class _MainShellState extends State<MainShell> {
     } else {
       await NotificationService().cancelDebrief();
     }
+  }
+
+  Future<void> _handleSmartAlertsChange(
+    bool runout,
+    bool usage,
+    TimeOfDay time,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('axis_notif_runout', runout);
+    await prefs.setBool('axis_notif_usage', usage);
+    await prefs.setInt('axis_smart_hour', time.hour);
+    await prefs.setInt('axis_smart_minute', time.minute);
+
+    setState(() {
+      _runoutNotifsEnabled = runout;
+      _usageNotifsEnabled = usage;
+      _smartAlertTime = time;
+    });
+    _refreshSmartNotifications();
   }
 
   void _handleTabToggle(String id, bool active) {
@@ -249,6 +407,9 @@ class _MainShellState extends State<MainShell> {
     );
   }
 
+  // NOTE: The _openAboutPage function is removed since the dialog is now
+  // built and shown inside SettingsSheet.
+
   Future<void> _importInventory() async {
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
@@ -296,6 +457,9 @@ class _MainShellState extends State<MainShell> {
           );
           await prefs.setString('axis_inventory', data);
           setState(() => _inventoryRefreshKey++);
+
+          await _refreshSmartNotifications();
+
           if (mounted)
             ScaffoldMessenger.of(
               context,
@@ -360,7 +524,9 @@ class _MainShellState extends State<MainShell> {
                   !reconstructedList.any(
                     (e) => e.type == "Room" && e.name == room,
                   )) {
-                reconstructedList.add(InventoryItem(name: room, type: "Room"));
+                reconstructedList.add(
+                  InventoryItem(name: room, type: "Room", quantity: 0),
+                );
               }
               reconstructedList.add(
                 InventoryItem(
@@ -382,6 +548,9 @@ class _MainShellState extends State<MainShell> {
           await prefs.setString('axis_inventory', invData);
           await prefs.setStringList('axis_activity_log', rawLogStorage);
           setState(() => _inventoryRefreshKey++);
+
+          await _refreshSmartNotifications();
+
           if (mounted)
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(content: Text("Restored $entryCount logs.")),
@@ -403,13 +572,26 @@ class _MainShellState extends State<MainShell> {
       builder: (ctx) => SettingsSheet(
         currentTabs: _tabs,
         allPossibleTabs: _allPossibleTabs,
-        runoutThreshold: _runoutThreshold,
-        runoutEnabled: _runoutNotificationsEnabled,
+        runoutThresholds: _runoutThresholds,
+        runoutEnabled: _runoutVisualsEnabled,
         debriefEnabled: _debriefEnabled,
         debriefTime: _debriefTime,
+
+        runoutNotificationsEnabled: _runoutNotifsEnabled,
+        usageNotificationsEnabled: _usageNotifsEnabled,
+        smartAlertTime: _smartAlertTime,
+        appVersion: _appVersion,
+
+        // The action is now simply closing the sheet, as the dialog is launched inside the sheet.
+        onViewAbout: () {
+          Navigator.pop(ctx);
+        },
+
         onTabToggled: _handleTabToggle,
-        onRunoutChanged: _handleRunoutChange,
+        onRunoutSettingsChanged: _handleRunoutSettings,
         onDebriefChanged: _handleDebriefChange,
+        onSmartAlertsChanged: _handleSmartAlertsChange,
+
         onImportInventory: () {
           Navigator.pop(ctx);
           _importInventory();

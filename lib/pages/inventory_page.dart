@@ -73,7 +73,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab> {
     final String changeStr = change?.toString() ?? "-";
     final String totalStr = total?.toString() ?? "-";
 
-    // Format: Timestamp|Action|Item|Room|Change|Total|Note
     final String logEntry =
         "$timestamp|$action|$safeItem|$safeRoom|$changeStr|$totalStr|";
 
@@ -84,7 +83,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab> {
   }
 
   // --- CSV EXPORT LOGIC ---
-
   Future<void> _exportInventoryCSV() async {
     if (inventoryList.isEmpty) return;
     String csvData = "Name,Type,Room Location,Quantity\n";
@@ -158,7 +156,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab> {
   }
 
   // --- ITEM MANAGEMENT ---
-
   void _addItem(String name, String type, String? room) {
     setState(() {
       inventoryList.add(
@@ -292,98 +289,120 @@ class _AxisInventoryTabState extends State<AxisInventoryTab> {
     );
   }
 
+  // --- UPDATED: RESTOCK DIALOG (No Purple + Counter Style) ---
   void _showQuantityDialog(InventoryItem item) {
     int tempQuantity = item.quantity == 0 ? 1 : item.quantity;
+    const Color themeTeal = Color(0xFF00C897);
 
     showDialog(
       context: context,
       builder: (BuildContext context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
-            return AlertDialog(
-              backgroundColor: const Color(0xFF222222),
-              title: Text(
-                item.name,
-                style: const TextStyle(color: Colors.white),
-                textAlign: TextAlign.center,
+            // Apply Theme to remove default purple
+            return Theme(
+              data: ThemeData.dark().copyWith(
+                colorScheme: const ColorScheme.dark(
+                  primary: themeTeal,
+                  onSurface: Colors.white,
+                ),
               ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    "Adjust Quantity",
-                    style: TextStyle(color: Colors.white54),
+              child: AlertDialog(
+                backgroundColor: const Color(0xFF222222),
+                title: Text(
+                  item.name,
+                  style: const TextStyle(color: Colors.white),
+                  textAlign: TextAlign.center,
+                ),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      "Adjust Quantity",
+                      style: TextStyle(color: Colors.white54, fontSize: 14),
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        // Minus Button
+                        IconButton(
+                          icon: const Icon(
+                            Icons.remove_circle_outline,
+                            color: Colors.white70,
+                            size: 32,
+                          ),
+                          onPressed: () {
+                            if (tempQuantity > 0) {
+                              setDialogState(() => tempQuantity--);
+                            }
+                          },
+                        ),
+
+                        // Counter Number
+                        Container(
+                          constraints: const BoxConstraints(minWidth: 60),
+                          alignment: Alignment.center,
+                          margin: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Text(
+                            "$tempQuantity",
+                            style: const TextStyle(
+                              color: themeTeal,
+                              fontSize: 32,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+
+                        // Plus Button
+                        IconButton(
+                          icon: const Icon(
+                            Icons.add_circle_outline,
+                            color: Colors.white70,
+                            size: 32,
+                          ),
+                          onPressed: () {
+                            setDialogState(() => tempQuantity++);
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    child: const Text(
+                      "Cancel",
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                    onPressed: () => Navigator.pop(context),
                   ),
-                  const SizedBox(height: 20),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      IconButton(
-                        onPressed: () {
-                          if (tempQuantity > 0)
-                            setDialogState(() {
-                              tempQuantity--;
-                            });
-                        },
-                        icon: const Icon(
-                          Icons.remove_circle_outline,
-                          color: Colors.white,
-                          size: 30,
-                        ),
+                  TextButton(
+                    child: const Text(
+                      "Update",
+                      style: TextStyle(
+                        color: themeTeal,
+                        fontWeight: FontWeight.bold,
                       ),
-                      const SizedBox(width: 20),
-                      Text(
-                        "$tempQuantity",
-                        style: const TextStyle(
-                          color: Color(0xFF00C897),
-                          fontSize: 32,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(width: 20),
-                      IconButton(
-                        onPressed: () {
-                          setDialogState(() {
-                            tempQuantity++;
-                          });
-                        },
-                        icon: const Icon(
-                          Icons.add_circle_outline,
-                          color: Colors.white,
-                          size: 30,
-                        ),
-                      ),
-                    ],
+                    ),
+                    onPressed: () {
+                      int diff = tempQuantity - item.quantity;
+                      setState(() {
+                        item.quantity = tempQuantity;
+                      });
+                      _saveData();
+                      _logActivity(
+                        "RESTOCKED",
+                        item.name,
+                        item.roomLocation ?? "Unknown",
+                        diff,
+                        tempQuantity,
+                      );
+                      Navigator.pop(context);
+                    },
                   ),
                 ],
               ),
-              actions: [
-                TextButton(
-                  child: const Text("Cancel"),
-                  onPressed: () => Navigator.pop(context),
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF00C897),
-                  ),
-                  child: const Text("Update"),
-                  onPressed: () {
-                    int diff = tempQuantity - item.quantity;
-                    setState(() {
-                      item.quantity = tempQuantity;
-                    });
-                    _saveData();
-                    _logActivity(
-                      "RESTOCKED",
-                      item.name,
-                      item.roomLocation ?? "Unknown",
-                      diff,
-                      tempQuantity,
-                    );
-                    Navigator.pop(context);
-                  },
-                ),
-              ],
             );
           },
         );
@@ -443,10 +462,12 @@ class _AxisInventoryTabState extends State<AxisInventoryTab> {
     );
   }
 
+  // --- UPDATED: ADD DIALOG (No Purple) ---
   void _showNameInputDialog({required bool isRoom}) {
     TextEditingController nameController = TextEditingController();
     String? selectedRoom;
     List<String> rooms = getRoomNames();
+    const Color themeTeal = Color(0xFF00C897);
 
     if (!isRoom && rooms.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -461,80 +482,107 @@ class _AxisInventoryTabState extends State<AxisInventoryTab> {
       builder: (BuildContext context) {
         return StatefulBuilder(
           builder: (context, setState) {
-            return AlertDialog(
-              backgroundColor: const Color(0xFF222222),
-              title: Text(
-                isRoom ? "New Room" : "New Item",
-                style: const TextStyle(color: Colors.white),
+            return Theme(
+              data: ThemeData.dark().copyWith(
+                colorScheme: const ColorScheme.dark(
+                  primary: themeTeal,
+                  onSurface: themeTeal,
+                ),
+                textSelectionTheme: const TextSelectionThemeData(
+                  cursorColor: themeTeal,
+                  selectionColor: themeTeal,
+                  selectionHandleColor: themeTeal,
+                ),
               ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: nameController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      hintText: isRoom ? "Enter Room Name" : "Enter Item Name",
-                      hintStyle: const TextStyle(color: Colors.white38),
-                      enabledBorder: const UnderlineInputBorder(
-                        borderSide: BorderSide(color: Color(0xFF00C897)),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  if (!isRoom) ...[
-                    const Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        "Select Room:",
-                        style: TextStyle(color: Colors.white54, fontSize: 12),
-                      ),
-                    ),
-                    DropdownButton<String>(
-                      value: selectedRoom,
-                      dropdownColor: const Color(0xFF333333),
-                      isExpanded: true,
-                      underline: Container(height: 1, color: Colors.white30),
+              child: AlertDialog(
+                backgroundColor: const Color(0xFF222222),
+                title: Text(
+                  isRoom ? "New Room" : "New Item",
+                  style: const TextStyle(color: Colors.white),
+                ),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      controller: nameController,
                       style: const TextStyle(color: Colors.white),
-                      items: rooms
-                          .map(
-                            (String room) => DropdownMenuItem<String>(
-                              value: room,
-                              child: Text(room),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (String? newValue) {
-                        setState(() {
-                          selectedRoom = newValue;
-                        });
-                      },
+                      cursorColor: themeTeal,
+                      // REMOVED 'const' HERE:
+                      decoration: InputDecoration(
+                        hintText: isRoom
+                            ? "Enter Room Name"
+                            : "Enter Item Name",
+                        hintStyle: const TextStyle(color: Colors.white38),
+                        enabledBorder: const UnderlineInputBorder(
+                          borderSide: BorderSide(color: themeTeal),
+                        ),
+                        focusedBorder: const UnderlineInputBorder(
+                          borderSide: BorderSide(color: themeTeal, width: 2.0),
+                        ),
+                      ),
                     ),
+                    const SizedBox(height: 20),
+                    if (!isRoom) ...[
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          "Select Room:",
+                          style: TextStyle(color: Colors.white54, fontSize: 12),
+                        ),
+                      ),
+                      DropdownButton<String>(
+                        value: selectedRoom,
+                        dropdownColor: const Color(0xFF333333),
+                        isExpanded: true,
+                        underline: Container(height: 1, color: Colors.white30),
+                        style: const TextStyle(color: Colors.white),
+                        focusColor: Colors.transparent,
+                        items: rooms
+                            .map(
+                              (String room) => DropdownMenuItem<String>(
+                                value: room,
+                                child: Text(room),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (String? newValue) {
+                          setState(() {
+                            selectedRoom = newValue;
+                          });
+                        },
+                      ),
+                    ],
                   ],
+                ),
+                actions: [
+                  TextButton(
+                    child: const Text(
+                      "Cancel",
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                  TextButton(
+                    child: const Text(
+                      "Save",
+                      style: TextStyle(
+                        color: themeTeal,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    onPressed: () {
+                      if (nameController.text.isNotEmpty) {
+                        _addItem(
+                          nameController.text,
+                          isRoom ? "Room" : "Item",
+                          selectedRoom,
+                        );
+                        Navigator.pop(context);
+                      }
+                    },
+                  ),
                 ],
               ),
-              actions: [
-                TextButton(
-                  child: const Text("Cancel"),
-                  onPressed: () => Navigator.pop(context),
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF00C897),
-                  ),
-                  child: const Text("Save"),
-                  onPressed: () {
-                    if (nameController.text.isNotEmpty) {
-                      _addItem(
-                        nameController.text,
-                        isRoom ? "Room" : "Item",
-                        selectedRoom,
-                      );
-                      Navigator.pop(context);
-                    }
-                  },
-                ),
-              ],
             );
           },
         );
@@ -579,7 +627,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab> {
                       icon: const Icon(Icons.history, color: Colors.white54),
                       tooltip: "View Logs",
                       onPressed: () async {
-                        // --- UPDATE: Wait for return, then refresh ---
                         await Navigator.push(
                           context,
                           MaterialPageRoute(

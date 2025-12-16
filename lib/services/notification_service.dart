@@ -1,12 +1,12 @@
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter/material.dart';
+import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'dart:async';
 import 'dart:io';
-import 'package:flutter/material.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:timezone/data/latest.dart' as tz;
-import 'package:timezone/timezone.dart' as tz;
 
 class NotificationService {
-  // Singleton pattern
   static final NotificationService _instance = NotificationService._internal();
   factory NotificationService() => _instance;
   NotificationService._internal();
@@ -19,71 +19,128 @@ class NotificationService {
 
   Future<void> init() async {
     tz.initializeTimeZones();
+    String timeZoneName;
+    try {
+      timeZoneName = await FlutterTimezone.getLocalTimezone();
+    } catch (e) {
+      timeZoneName = 'America/Chicago';
+    }
+    try {
+      tz.setLocalLocation(tz.getLocation(timeZoneName));
+    } catch (e) {
+      tz.setLocalLocation(tz.getLocation('America/Chicago'));
+    }
 
+    // CHANGED: Now looks for 'notification_icon'
     const AndroidInitializationSettings initializationSettingsAndroid =
         AndroidInitializationSettings('notification_icon');
 
+    const DarwinInitializationSettings initializationSettingsDarwin =
+        DarwinInitializationSettings(
+          requestSoundPermission: true,
+          requestBadgePermission: true,
+          requestAlertPermission: true,
+        );
+
     const InitializationSettings initializationSettings =
-        InitializationSettings(android: initializationSettingsAndroid);
+        InitializationSettings(
+          android: initializationSettingsAndroid,
+          iOS: initializationSettingsDarwin,
+        );
 
     await flutterLocalNotificationsPlugin.initialize(
       initializationSettings,
-      onDidReceiveNotificationResponse:
-          (NotificationResponse notificationResponse) {
-            selectNotificationStream.add(notificationResponse.payload);
-          },
+      onDidReceiveNotificationResponse: (NotificationResponse response) {
+        selectNotificationStream.add(response.payload);
+      },
     );
   }
 
   Future<void> requestPermissions() async {
     if (Platform.isAndroid) {
-      final AndroidFlutterLocalNotificationsPlugin? androidImplementation =
-          flutterLocalNotificationsPlugin
-              .resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin
-              >();
-
-      await androidImplementation?.requestNotificationsPermission();
-      await androidImplementation?.requestExactAlarmsPermission();
+      await flutterLocalNotificationsPlugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >()
+          ?.requestNotificationsPermission();
+    } else if (Platform.isIOS) {
+      await flutterLocalNotificationsPlugin
+          .resolvePlatformSpecificImplementation<
+            IOSFlutterLocalNotificationsPlugin
+          >()
+          ?.requestPermissions(alert: true, badge: true, sound: true);
     }
   }
 
-  Future<void> showInstant(String title, String body) async {
-    const AndroidNotificationDetails androidDetails =
-        AndroidNotificationDetails(
-          'instant_channel_id',
-          'Instant Notifications',
-          importance: Importance.max,
-          priority: Priority.high,
-          icon: 'notification_icon',
-          color: Color(0xFF00C897),
-        );
-    const NotificationDetails details = NotificationDetails(
-      android: androidDetails,
-    );
-    await flutterLocalNotificationsPlugin.show(0, title, body, details);
+  Future<String?> getLaunchPayload() async {
+    final NotificationAppLaunchDetails? details =
+        await flutterLocalNotificationsPlugin.getNotificationAppLaunchDetails();
+    if (details?.didNotificationLaunchApp ?? false) {
+      return details?.notificationResponse?.payload;
+    }
+    return null;
   }
 
-  // NEW: Generic Daily Scheduler
-  Future<void> scheduleDaily(
-    int id,
-    String title,
-    String body,
-    TimeOfDay time,
-  ) async {
-    final tz.TZDateTime now = tz.TZDateTime.now(tz.local);
+  // --- NIGHT DEBRIEF ---
+  Future<void> scheduleDebrief(TimeOfDay time) async {
+    final tz.TZDateTime nowLocal = tz.TZDateTime.now(tz.local);
     tz.TZDateTime scheduledDate = tz.TZDateTime(
       tz.local,
-      now.year,
-      now.month,
-      now.day,
+      nowLocal.year,
+      nowLocal.month,
+      nowLocal.day,
       time.hour,
       time.minute,
     );
 
-    if (scheduledDate.isBefore(now)) {
+    if (scheduledDate.isBefore(nowLocal)) {
       scheduledDate = scheduledDate.add(const Duration(days: 1));
     }
+
+    await flutterLocalNotificationsPlugin.zonedSchedule(
+      0,
+      'Axis Debrief',
+      'Time to review your day.',
+      scheduledDate,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'axis_daily_channel_v3',
+          'Daily Debrief',
+          importance: Importance.max,
+          priority: Priority.high,
+          icon: 'notification_icon', // CHANGED HERE
+        ),
+        iOS: DarwinNotificationDetails(),
+      ),
+      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+      matchDateTimeComponents: DateTimeComponents.time,
+      payload: 'night_debrief',
+    );
+  }
+
+  // --- SMART ALERTS ---
+  Future<void> scheduleSmartAlert({
+    required int id,
+    required String title,
+    required String body,
+    required DateTime date,
+    required TimeOfDay time,
+    required String payload,
+  }) async {
+    final tz.TZDateTime nowLocal = tz.TZDateTime.now(tz.local);
+
+    tz.TZDateTime scheduledDate = tz.TZDateTime(
+      tz.local,
+      date.year,
+      date.month,
+      date.day,
+      time.hour,
+      time.minute,
+    );
+
+    if (scheduledDate.isBefore(nowLocal)) return;
 
     await flutterLocalNotificationsPlugin.zonedSchedule(
       id,
@@ -92,83 +149,25 @@ class NotificationService {
       scheduledDate,
       const NotificationDetails(
         android: AndroidNotificationDetails(
-          'daily_channel_id',
-          'Daily Notifications',
+          'axis_smart_alerts',
+          'Inventory Alerts',
           importance: Importance.max,
           priority: Priority.high,
-          icon: 'notification_icon',
-          color: Color(0xFF00C897),
+          icon: 'notification_icon', // CHANGED HERE
         ),
+        iOS: DarwinNotificationDetails(),
       ),
-      matchDateTimeComponents: DateTimeComponents.time,
+      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
       uiLocalNotificationDateInterpretation:
           UILocalNotificationDateInterpretation.absoluteTime,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      payload: payload,
     );
-  }
 
-  Future<void> scheduleDebrief(TimeOfDay time) async {
-    // Reusing the logic above, but keeping this method for specific Settings usage
-    // logic (like the UTC conversion if needed) or just redirecting to scheduleDaily
-    // For now, we keep the specific implementation for Debrief to avoid regression
-    try {
-      final DateTime now = DateTime.now();
-      DateTime scheduledLocal = DateTime(
-        now.year,
-        now.month,
-        now.day,
-        time.hour,
-        time.minute,
-      );
-
-      if (scheduledLocal.isBefore(now)) {
-        scheduledLocal = scheduledLocal.add(const Duration(days: 1));
-      }
-
-      tz.TZDateTime nextTimeUtc = tz.TZDateTime.from(
-        scheduledLocal.toUtc(),
-        tz.UTC,
-      );
-
-      await flutterLocalNotificationsPlugin.zonedSchedule(
-        888,
-        'Debrief Waiting',
-        'Your nightly debrief is ready.',
-        nextTimeUtc,
-        const NotificationDetails(
-          android: AndroidNotificationDetails(
-            'debrief_channel_v5',
-            'Debrief Notifications',
-            channelDescription: 'Daily reminder for nightly debrief',
-            importance: Importance.max,
-            priority: Priority.high,
-            icon: 'notification_icon',
-            color: Color(0xFF00C897),
-          ),
-        ),
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
-        matchDateTimeComponents: DateTimeComponents.time,
-        payload: 'night_debrief',
-      );
-    } catch (e) {
-      debugPrint("Error scheduling debrief: $e");
-    }
-  }
-
-  Future<void> sendTestNotification() async {
-    await showInstant(
-      "Test Notification",
-      "If you see this, notifications are working!",
-    );
+    debugPrint("🔔 Scheduled '$title' for $scheduledDate");
   }
 
   Future<void> cancelDebrief() async {
-    await flutterLocalNotificationsPlugin.cancel(888);
-  }
-
-  Future<void> cancelAll() async {
-    await flutterLocalNotificationsPlugin.cancelAll();
+    await flutterLocalNotificationsPlugin.cancel(0);
+    debugPrint("Cancelled daily debrief");
   }
 }

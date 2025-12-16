@@ -1,21 +1,27 @@
 import 'package:flutter/material.dart';
 import '../models/tab_data.dart';
-import '../services/notification_service.dart';
 
 class SettingsSheet extends StatefulWidget {
   final List<TabData> currentTabs;
   final List<TabData> allPossibleTabs;
 
-  // State variables passed down
-  final int runoutThreshold;
+  // Settings Data
+  final List<int> runoutThresholds;
   final bool runoutEnabled;
   final bool debriefEnabled;
   final TimeOfDay debriefTime;
+  final bool runoutNotificationsEnabled;
+  final bool usageNotificationsEnabled;
+  final TimeOfDay smartAlertTime;
+  final String appVersion;
 
   // Callbacks
-  final Function(String id, bool active) onTabToggled;
-  final Function(int days, bool enabled) onRunoutChanged;
-  final Function(bool enabled, TimeOfDay time) onDebriefChanged;
+  final VoidCallback onViewAbout;
+  final Function(String, bool) onTabToggled;
+  final Function(List<int>, bool) onRunoutSettingsChanged;
+  final Function(bool, TimeOfDay) onDebriefChanged;
+  final Function(bool, bool, TimeOfDay) onSmartAlertsChanged;
+
   final VoidCallback onImportInventory;
   final VoidCallback onImportActivity;
   final VoidCallback onResetData;
@@ -25,13 +31,19 @@ class SettingsSheet extends StatefulWidget {
     super.key,
     required this.currentTabs,
     required this.allPossibleTabs,
-    required this.runoutThreshold,
+    required this.runoutThresholds,
     required this.runoutEnabled,
     required this.debriefEnabled,
     required this.debriefTime,
+    required this.runoutNotificationsEnabled,
+    required this.usageNotificationsEnabled,
+    required this.smartAlertTime,
+    required this.appVersion,
+    required this.onViewAbout,
     required this.onTabToggled,
-    required this.onRunoutChanged,
+    required this.onRunoutSettingsChanged,
     required this.onDebriefChanged,
+    required this.onSmartAlertsChanged,
     required this.onImportInventory,
     required this.onImportActivity,
     required this.onResetData,
@@ -43,39 +55,237 @@ class SettingsSheet extends StatefulWidget {
 }
 
 class _SettingsSheetState extends State<SettingsSheet> {
-  late Set<String> _localActiveTabIds;
+  late Set<String> _activeTabIds;
 
-  // We don't need local state for alerts anymore since they are disabled visually
-  // but we keep the variables to prevent crashes if code references them.
-  late int _localRunoutThreshold;
-  late bool _localRunoutEnabled;
-  late bool _localDebriefEnabled;
-  late TimeOfDay _localDebriefTime;
+  late bool _debriefEnabled;
+  late TimeOfDay _debriefTime;
 
-  final Color _themeTeal = const Color(0xFF00C897);
+  late List<int> _thresholds;
+  late bool _runoutVisualsEnabled;
+
+  late bool _runoutNotifsEnabled;
+  late bool _usageNotifsEnabled;
+  late TimeOfDay _smartAlertTime;
+
+  static const Color _themeTeal = Color(0xFF00C897);
 
   @override
   void initState() {
     super.initState();
-    _localActiveTabIds = widget.currentTabs.map((t) => t.id).toSet();
-    _localRunoutThreshold = widget.runoutThreshold;
-    _localRunoutEnabled = widget.runoutEnabled;
-    _localDebriefEnabled = widget.debriefEnabled;
-    _localDebriefTime = widget.debriefTime;
+    _activeTabIds = widget.currentTabs.map((t) => t.id).toSet();
+
+    _debriefEnabled = widget.debriefEnabled;
+    _debriefTime = widget.debriefTime;
+
+    _thresholds = List.from(widget.runoutThresholds)
+      ..sort((a, b) => b.compareTo(a));
+    _runoutVisualsEnabled = widget.runoutEnabled;
+
+    _runoutNotifsEnabled = widget.runoutNotificationsEnabled;
+    _usageNotifsEnabled = widget.usageNotificationsEnabled;
+    _smartAlertTime = widget.smartAlertTime;
   }
 
-  void _handleTabSwitch(String id, bool val) {
+  String _formatTime(TimeOfDay t) {
+    final now = DateTime.now();
+    final dt = DateTime(now.year, now.month, now.day, t.hour, t.minute);
+    String h = dt.hour > 12
+        ? (dt.hour - 12).toString()
+        : (dt.hour == 0 ? "12" : dt.hour.toString());
+    String m = dt.minute.toString().padLeft(2, '0');
+    String a = dt.hour >= 12 ? "PM" : "AM";
+    return "$h:$m $a";
+  }
+
+  Future<void> _pickDebriefTime() async {
+    final picked = await _showTimePicker(_debriefTime);
+    if (picked != null) {
+      setState(() => _debriefTime = picked);
+      widget.onDebriefChanged(_debriefEnabled, picked);
+    }
+  }
+
+  Future<void> _pickSmartAlertTime() async {
+    final picked = await _showTimePicker(_smartAlertTime);
+    if (picked != null) {
+      setState(() => _smartAlertTime = picked);
+      widget.onSmartAlertsChanged(
+        _runoutNotifsEnabled,
+        _usageNotifsEnabled,
+        picked,
+      );
+    }
+  }
+
+  Future<TimeOfDay?> _showTimePicker(TimeOfDay initial) {
+    return showTimePicker(
+      context: context,
+      initialTime: initial,
+      builder: (context, child) {
+        return Theme(
+          data: ThemeData.dark().copyWith(
+            colorScheme: const ColorScheme.dark(
+              primary: _themeTeal,
+              onPrimary: Colors.white,
+              surface: Color(0xFF222222),
+              onSurface: Colors.white,
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+  }
+
+  void _toggleTabLocally(String id, bool active) {
     setState(() {
-      if (val) {
-        _localActiveTabIds.add(id);
+      if (active) {
+        _activeTabIds.add(id);
       } else {
-        _localActiveTabIds.remove(id);
+        if (_activeTabIds.length > 1) {
+          _activeTabIds.remove(id);
+        } else {
+          active = true;
+        }
       }
     });
-    widget.onTabToggled(id, val);
+    widget.onTabToggled(id, active);
   }
 
-  // --- NEW IMPROVED ABOUT DIALOG ---
+  void _addThreshold() {
+    int currentValue = 3;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF222222),
+            title: const Text(
+              "Add Trigger",
+              style: TextStyle(color: Colors.white),
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  "Days Remaining:",
+                  style: TextStyle(color: Colors.white54, fontSize: 14),
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    IconButton(
+                      icon: const Icon(
+                        Icons.remove_circle_outline,
+                        color: Colors.white70,
+                        size: 32,
+                      ),
+                      onPressed: () {
+                        if (currentValue > 1) {
+                          setDialogState(() => currentValue--);
+                        }
+                      },
+                    ),
+
+                    Container(
+                      constraints: const BoxConstraints(minWidth: 60),
+                      alignment: Alignment.center,
+                      margin: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Text(
+                        "$currentValue",
+                        style: const TextStyle(
+                          color: _themeTeal,
+                          fontSize: 32,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+
+                    IconButton(
+                      icon: const Icon(
+                        Icons.add_circle_outline,
+                        color: Colors.white70,
+                        size: 32,
+                      ),
+                      onPressed: () {
+                        if (currentValue < 365) {
+                          setDialogState(() => currentValue++);
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                child: const Text(
+                  "Cancel",
+                  style: TextStyle(color: Colors.white54),
+                ),
+                onPressed: () => Navigator.pop(ctx),
+              ),
+              TextButton(
+                child: const Text(
+                  "Add",
+                  style: TextStyle(
+                    color: _themeTeal,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                onPressed: () {
+                  if (!_thresholds.contains(currentValue)) {
+                    setState(() {
+                      _thresholds.add(currentValue);
+                      _thresholds.sort((a, b) => b.compareTo(a));
+                    });
+                    widget.onRunoutSettingsChanged(
+                      _thresholds,
+                      _runoutVisualsEnabled,
+                    );
+                    Navigator.pop(ctx);
+                  } else {
+                    Navigator.pop(ctx);
+                  }
+                },
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _removeThreshold(int value) {
+    setState(() {
+      _thresholds.remove(value);
+    });
+    widget.onRunoutSettingsChanged(_thresholds, _runoutVisualsEnabled);
+  }
+
+  Widget _buildSmallTriggerBox(int days) {
+    return GestureDetector(
+      onTap: () => _removeThreshold(days),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.white24),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          "$days days",
+          style: const TextStyle(
+            color: _themeTeal,
+            fontWeight: FontWeight.bold,
+            fontSize: 12,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- NEW IMPROVED ABOUT DIALOG METHOD ---
   void _showAboutDialog(BuildContext context) {
     showDialog(
       context: context,
@@ -87,7 +297,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Logo from Assets
+              // Logo from Assets (Wrapped to ensure size/shape)
               Container(
                 width: 80,
                 height: 80,
@@ -106,7 +316,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
                     fit: BoxFit.cover,
                     // Fallback icon in case asset isn't loaded yet
                     errorBuilder: (context, error, stackTrace) =>
-                        Icon(Icons.hub, size: 40, color: _themeTeal),
+                        const Icon(Icons.hub, size: 40, color: _themeTeal),
                   ),
                 ),
               ),
@@ -123,7 +333,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
                 ),
               ),
 
-              // Version Badge
+              // Version Badge (Using widget.appVersion)
               Container(
                 margin: const EdgeInsets.symmetric(vertical: 8),
                 padding: const EdgeInsets.symmetric(
@@ -134,19 +344,22 @@ class _SettingsSheetState extends State<SettingsSheet> {
                   color: Colors.white10,
                   borderRadius: BorderRadius.circular(20),
                 ),
-                child: const Text(
-                  "v0.1.0", // Updated Version
-                  style: TextStyle(color: Colors.white54, fontSize: 10),
+                child: Text(
+                  "v${widget.appVersion}", // Using widget.appVersion
+                  style: const TextStyle(color: Colors.white54, fontSize: 10),
                 ),
               ),
               const SizedBox(height: 20),
 
-              // Features Grid
+              // Features Grid - UPDATED FEATURE LIST HERE
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
                   _buildAboutFeature(Icons.privacy_tip_outlined, "Local Data"),
-                  _buildAboutFeature(Icons.construction, "Alpha Build"),
+                  _buildAboutFeature(
+                    Icons.notifications_active,
+                    "Smart Notifications",
+                  ), // <-- UPDATED
                   _buildAboutFeature(Icons.grid_view_rounded, "Modular"),
                 ],
               ),
@@ -202,248 +415,383 @@ class _SettingsSheetState extends State<SettingsSheet> {
     );
   }
 
-  // --- MAIN SETTINGS UI ---
-
   @override
   Widget build(BuildContext context) {
-    return DraggableScrollableSheet(
-      initialChildSize: 0.85,
-      minChildSize: 0.5,
-      maxChildSize: 0.95,
-      builder: (context, scrollController) {
-        return Container(
-          decoration: BoxDecoration(
-            color: const Color(0xFF111111),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
-            boxShadow: [
-              BoxShadow(color: Colors.black.withOpacity(0.5), blurRadius: 20),
-            ],
+    const Color themeTeal = Color(0xFF00C897);
+
+    return Container(
+      height: MediaQuery.of(context).size.height * 0.9,
+      padding: const EdgeInsets.all(20),
+      decoration: const BoxDecoration(
+        color: Color(0xFF111111),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 50,
+              height: 5,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
           ),
-          child: Column(
-            children: [
-              // Drag Handle
-              Container(
-                margin: const EdgeInsets.only(top: 15, bottom: 20),
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.grey[800],
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
+          const SizedBox(height: 20),
+          const Text(
+            "Settings",
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 20),
 
-              // Title
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 24,
-                  vertical: 0,
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      "Settings",
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 28,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(
-                        Icons.info_outline,
-                        color: Colors.white54,
-                      ),
-                      onPressed: () => _showAboutDialog(context),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 20),
-
-              // Settings List
-              Expanded(
-                child: ListView(
-                  controller: scrollController,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 10,
+          Expanded(
+            child: ListView(
+              children: [
+                // 1. VISIBLE TABS
+                const Text(
+                  "VISIBLE TABS",
+                  style: TextStyle(
+                    color: themeTeal,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.5,
                   ),
-                  children: [
-                    _buildSectionHeader("CUSTOMIZATION"),
-                    _buildCard([
-                      ExpansionTile(
-                        title: const Text(
-                          "Active Modules",
-                          style: TextStyle(color: Colors.white),
-                        ),
-                        leading: const Icon(
-                          Icons.dashboard_customize,
-                          color: Colors.white70,
-                        ),
-                        iconColor: _themeTeal,
-                        collapsedIconColor: Colors.white54,
-                        children: widget.allPossibleTabs.map((tab) {
-                          bool isActive = _localActiveTabIds.contains(tab.id);
-                          return SwitchListTile(
-                            title: Text(
-                              tab.id.toUpperCase(),
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 14,
-                              ),
-                            ),
-                            secondary: Icon(
+                ),
+                const SizedBox(height: 10),
+                Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.05),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    children: widget.allPossibleTabs.map((tab) {
+                      final bool isActive = _activeTabIds.contains(tab.id);
+                      return SwitchListTile(
+                        activeColor: themeTeal,
+                        title: Row(
+                          children: [
+                            Icon(
                               tab.icon,
-                              color: isActive ? _themeTeal : Colors.white24,
+                              color: isActive ? Colors.white : Colors.white38,
                               size: 20,
                             ),
-                            activeColor: _themeTeal,
-                            inactiveTrackColor: Colors.grey[800],
-                            contentPadding: const EdgeInsets.only(
-                              left: 16,
-                              right: 16,
+                            const SizedBox(width: 10),
+                            Text(
+                              tab.id.toUpperCase(),
+                              style: TextStyle(
+                                color: isActive ? Colors.white : Colors.white54,
+                              ),
                             ),
-                            value: isActive,
-                            onChanged: (val) => _handleTabSwitch(tab.id, val),
-                          );
-                        }).toList(),
-                      ),
-                    ]),
-
-                    _buildSectionHeader("SMART ALERTS (COMING SOON)"),
-                    _buildCard([
-                      // DISABLED TILE 1
-                      ListTile(
-                        title: const Text(
-                          "Low Stock Warning",
-                          style: TextStyle(color: Colors.white38),
-                        ), // Dimmed text
-                        subtitle: const Text(
-                          "This feature will come in a future update.",
-                          style: TextStyle(color: Colors.white24, fontSize: 12),
+                          ],
                         ),
-                        leading: const Icon(
-                          Icons.inventory,
-                          color: Colors.white24,
-                        ),
-                        trailing: Switch(
-                          value: false, // Force Off
-                          onChanged: null, // Disabled
-                          activeColor: _themeTeal,
-                        ),
-                      ),
-                      Divider(color: Colors.grey[850], height: 1),
-
-                      // DISABLED TILE 2
-                      ListTile(
-                        title: const Text(
-                          "Daily Debrief",
-                          style: TextStyle(color: Colors.white38),
-                        ), // Dimmed text
-                        subtitle: const Text(
-                          "This feature will come in a future update.",
-                          style: TextStyle(color: Colors.white24, fontSize: 12),
-                        ),
-                        leading: const Icon(
-                          Icons.wb_twilight,
-                          color: Colors.white24,
-                        ),
-                        trailing: Switch(
-                          value: false, // Force Off
-                          onChanged: null, // Disabled
-                          activeColor: _themeTeal,
-                        ),
-                      ),
-                      // Removed Test Button since functionality is disabled
-                    ]),
-
-                    _buildSectionHeader("DATA MANAGEMENT"),
-                    _buildCard([
-                      ListTile(
-                        title: const Text(
-                          "Import Inventory CSV",
-                          style: TextStyle(color: Colors.white),
-                        ),
-                        leading: const Icon(
-                          Icons.upload_file,
-                          color: Colors.white70,
-                        ),
-                        onTap: widget.onImportInventory,
-                      ),
-                      Divider(color: Colors.grey[850], height: 1),
-                      ListTile(
-                        title: const Text(
-                          "Import Activity Log CSV",
-                          style: TextStyle(color: Colors.white),
-                        ),
-                        leading: const Icon(
-                          Icons.history,
-                          color: Colors.white70,
-                        ),
-                        onTap: widget.onImportActivity,
-                      ),
-                      Divider(color: Colors.grey[850], height: 1),
-                      ListTile(
-                        title: const Text(
-                          "View CSV Formats",
-                          style: TextStyle(color: Colors.white),
-                        ),
-                        leading: const Icon(
-                          Icons.help_outline,
-                          color: Colors.white70,
-                        ),
-                        onTap: widget.onViewCSVFormats,
-                      ),
-                    ]),
-
-                    _buildCard([
-                      ListTile(
-                        title: const Text(
-                          "Reset All Data",
-                          style: TextStyle(color: Colors.redAccent),
-                        ),
-                        leading: const Icon(
-                          Icons.delete_forever,
-                          color: Colors.redAccent,
-                        ),
-                        onTap: widget.onResetData,
-                      ),
-                    ]),
-
-                    const SizedBox(height: 40),
-                  ],
+                        value: isActive,
+                        onChanged: (val) => _toggleTabLocally(tab.id, val),
+                      );
+                    }).toList(),
+                  ),
                 ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
 
-  Widget _buildSectionHeader(String title) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 24, bottom: 8, left: 8),
-      child: Text(
-        title,
-        style: const TextStyle(
-          color: Colors.white38,
-          fontSize: 12,
-          fontWeight: FontWeight.bold,
-          letterSpacing: 1.5,
-        ),
+                const SizedBox(height: 30),
+
+                // 2. NOTIFICATIONS
+                const Text(
+                  "NOTIFICATIONS",
+                  style: TextStyle(
+                    color: themeTeal,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 10),
+
+                // NIGHT DEBRIEF BLOCK
+                _buildSection([
+                  SwitchListTile(
+                    activeColor: themeTeal,
+                    title: const Text(
+                      "Debrief",
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: const Text(
+                      "Review your day",
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
+                    value: _debriefEnabled,
+                    onChanged: (val) {
+                      setState(() => _debriefEnabled = val);
+                      widget.onDebriefChanged(val, _debriefTime);
+                    },
+                  ),
+                  if (_debriefEnabled)
+                    ListTile(
+                      dense: true,
+                      title: const Text(
+                        "    Review Time",
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                      trailing: _buildTimeBox(_formatTime(_debriefTime)),
+                      onTap: _pickDebriefTime,
+                    ),
+                ]),
+
+                const SizedBox(height: 10),
+
+                // SMART ALERTS BLOCK
+                _buildSection([
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.05),
+                      borderRadius: const BorderRadius.vertical(
+                        top: Radius.circular(12),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          "SMART ALERT TIME",
+                          style: TextStyle(
+                            color: themeTeal,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1,
+                            fontSize: 12,
+                          ),
+                        ),
+                        GestureDetector(
+                          onTap: _pickSmartAlertTime,
+                          child: _buildTimeBox(_formatTime(_smartAlertTime)),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const Divider(height: 1, color: Colors.white10),
+
+                  // Runout Warnings
+                  SwitchListTile(
+                    activeColor: themeTeal,
+                    title: const Text(
+                      "Runout Warnings",
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: const Text(
+                      "Notify before items empty",
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
+                    value: _runoutNotifsEnabled,
+                    onChanged: (val) {
+                      setState(() => _runoutNotifsEnabled = val);
+                      widget.onSmartAlertsChanged(
+                        val,
+                        _usageNotifsEnabled,
+                        _smartAlertTime,
+                      );
+                    },
+                  ),
+
+                  if (_runoutNotifsEnabled)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                      child: Row(
+                        children: [
+                          const Text(
+                            "Triggers:",
+                            style: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const Spacer(),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            alignment: WrapAlignment.end,
+                            children: [
+                              ..._thresholds.map(
+                                (t) => _buildSmallTriggerBox(t),
+                              ),
+
+                              InkWell(
+                                onTap: _addThreshold,
+                                borderRadius: BorderRadius.circular(20),
+                                child: Container(
+                                  padding: const EdgeInsets.all(4),
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    border: Border.all(color: Colors.white38),
+                                  ),
+                                  child: const Icon(
+                                    Icons.add,
+                                    color: themeTeal,
+                                    size: 16,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  const Divider(color: Colors.white10, height: 1),
+
+                  // Usage Reminders
+                  SwitchListTile(
+                    activeColor: themeTeal,
+                    title: const Text(
+                      "Usage Reminders",
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: const Text(
+                      "Based on the average rate",
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
+                    value: _usageNotifsEnabled,
+                    onChanged: (val) {
+                      setState(() => _usageNotifsEnabled = val);
+                      widget.onSmartAlertsChanged(
+                        _runoutNotifsEnabled,
+                        val,
+                        _smartAlertTime,
+                      );
+                    },
+                  ),
+                ]),
+
+                const SizedBox(height: 30),
+
+                // 3. DATA
+                const Text(
+                  "DATA MANAGEMENT",
+                  style: TextStyle(
+                    color: themeTeal,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                _buildSection([
+                  ListTile(
+                    leading: const Icon(Icons.download, color: Colors.white),
+                    title: const Text(
+                      "Import Inventory",
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: widget.onImportInventory,
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.history, color: Colors.white),
+                    title: const Text(
+                      "Import Log",
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: widget.onImportActivity,
+                  ),
+                  ListTile(
+                    leading: const Icon(
+                      Icons.delete_forever,
+                      color: Colors.redAccent,
+                    ),
+                    title: const Text(
+                      "Reset Data",
+                      style: TextStyle(color: Colors.redAccent),
+                    ),
+                    onTap: widget.onResetData,
+                  ),
+                  ListTile(
+                    leading: const Icon(
+                      Icons.info_outline,
+                      color: Colors.white54,
+                    ),
+                    title: const Text(
+                      "View CSV Formats",
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                    onTap: widget.onViewCSVFormats,
+                  ),
+                ]),
+
+                const SizedBox(height: 30),
+
+                // --- ABOUT ---
+                const Text(
+                  "APP INFO",
+                  style: TextStyle(
+                    color: themeTeal,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                _buildSection([
+                  ListTile(
+                    leading: const Icon(Icons.info, color: Colors.white),
+                    title: const Text(
+                      "About Axis",
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: () => _showAboutDialog(context),
+                  ),
+                  ListTile(
+                    leading: const Icon(
+                      Icons.developer_mode,
+                      color: Colors.white54,
+                    ),
+                    title: const Text(
+                      "Version",
+                      style: TextStyle(color: Colors.white54),
+                    ),
+                    trailing: Text(
+                      "v${widget.appVersion}",
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    onTap: () {},
+                  ),
+                ]),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildCard(List<Widget> children) {
+  Widget _buildSection(List<Widget> children) {
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFF222222),
-        borderRadius: BorderRadius.circular(16),
+        color: Colors.white.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(12),
       ),
       child: Column(children: children),
+    );
+  }
+
+  Widget _buildTimeBox(String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.white24),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(color: _themeTeal, fontWeight: FontWeight.bold),
+      ),
     );
   }
 }
