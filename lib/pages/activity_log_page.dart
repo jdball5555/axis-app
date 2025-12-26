@@ -29,7 +29,7 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
   Future<void> _saveLogs() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList('axis_activity_log', logs);
-    _loadLogs(); // Refresh UI
+    _loadLogs();
   }
 
   DateTime? _parseTimestamp(String timestamp) {
@@ -39,18 +39,14 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
       try {
         List<String> parts = timestamp.split(' ');
         if (parts.length < 2) return null;
-
         List<String> dateParts = parts[0].split('-');
         List<String> timeParts = parts[1].split(':');
-
         String y = dateParts[0];
         String m = dateParts[1].padLeft(2, '0');
         String d = dateParts[2].padLeft(2, '0');
-
         String h = timeParts[0].padLeft(2, '0');
         String min = timeParts[1].padLeft(2, '0');
         String s = timeParts[2].padLeft(2, '0');
-
         return DateTime.parse("$y-$m-$d $h:$min:$s");
       } catch (e) {
         return null;
@@ -63,44 +59,30 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
     return "${dt.year}-${twoDigits(dt.month)}-${twoDigits(dt.day)} ${twoDigits(dt.hour)}:${twoDigits(dt.minute)}:${twoDigits(dt.second)}";
   }
 
-  // --- REVERT LOGIC ---
   Future<void> _revertInventoryChange(String logEntry) async {
     List<String> parts = logEntry.split('|');
     if (parts.length < 5) return;
-
     String itemName = parts[2];
     int changeAmount = int.tryParse(parts[4]) ?? 0;
-
-    // Only revert if there was a numerical change
     if (changeAmount != 0) {
       final prefs = await SharedPreferences.getInstance();
       final String? invData = prefs.getString('axis_inventory');
-
       if (invData != null) {
         final List<dynamic> jsonList = jsonDecode(invData);
         List<InventoryItem> items = jsonList
             .map((e) => InventoryItem.fromJson(e))
             .toList();
-
         int itemIndex = items.indexWhere(
           (i) => i.name == itemName && i.type == 'Item',
         );
-
         if (itemIndex != -1) {
-          // REVERSE LOGIC:
-          // If we added 5, now subtract 5.
-          // If we subtracted 1 (change = -1), now add 1 (change = --1 = +1).
           int newQty = items[itemIndex].quantity - changeAmount;
-          if (newQty < 0) newQty = 0; // Safety check
-
+          if (newQty < 0) newQty = 0;
           items[itemIndex].quantity = newQty;
-
-          // Save back to DB
           await prefs.setString(
             'axis_inventory',
             jsonEncode(items.map((e) => e.toJson()).toList()),
           );
-
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(content: Text("Reverted inventory for $itemName.")),
@@ -115,18 +97,25 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF222222),
-        title: const Text(
+        backgroundColor: Theme.of(context).cardColor,
+        title: Text(
           "Delete & Revert?",
-          style: TextStyle(color: Colors.white),
+          style: TextStyle(color: Theme.of(context).colorScheme.onSurface),
         ),
-        content: const Text(
-          "Deleting this entry will also UNDO any inventory changes (e.g., add back used items).",
-          style: TextStyle(color: Colors.white70),
+        content: Text(
+          "Deleting this entry will also UNDO any inventory changes.",
+          style: TextStyle(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
         ),
         actions: [
           TextButton(
-            child: const Text("Cancel"),
+            child: Text(
+              "Cancel",
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
             onPressed: () => Navigator.pop(ctx),
           ),
           TextButton(
@@ -135,10 +124,7 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
               style: TextStyle(color: Colors.redAccent),
             ),
             onPressed: () async {
-              // 1. Perform Revert Logic First
               await _revertInventoryChange(logs[originalIndex]);
-
-              // 2. Delete the Log
               setState(() {
                 logs.removeAt(originalIndex);
               });
@@ -160,32 +146,35 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
       text: currentNote,
     );
     DateTime selectedDate = _parseTimestamp(currentTimestamp) ?? DateTime.now();
-
     showDialog(
       context: context,
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              backgroundColor: const Color(0xFF222222),
-              title: const Text(
+              backgroundColor: Theme.of(context).cardColor,
+              title: Text(
                 "Edit Entry",
-                style: TextStyle(color: Colors.white),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
               ),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   OutlinedButton.icon(
-                    icon: const Icon(
+                    icon: Icon(
                       Icons.calendar_today,
-                      color: Color(0xFF00C897),
+                      color: Theme.of(context).primaryColor,
                     ),
                     label: Text(
                       "${selectedDate.year}-${selectedDate.month.toString().padLeft(2, '0')}-${selectedDate.day.toString().padLeft(2, '0')} ${selectedDate.hour.toString().padLeft(2, '0')}:${selectedDate.minute.toString().padLeft(2, '0')}",
-                      style: const TextStyle(color: Colors.white),
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
                     ),
                     style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Colors.white24),
+                      side: BorderSide(color: Theme.of(context).dividerColor),
                     ),
                     onPressed: () async {
                       final DateTime? date = await showDatePicker(
@@ -194,41 +183,19 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                         firstDate: DateTime(2000),
                         lastDate: DateTime(2100),
                         builder: (context, child) {
-                          return Theme(
-                            data: ThemeData.dark().copyWith(
-                              colorScheme: const ColorScheme.dark(
-                                primary: Color(0xFF00C897),
-                                onPrimary: Colors.white,
-                                surface: Color(0xFF222222),
-                                onSurface: Colors.white,
-                              ),
-                            ),
-                            child: child!,
-                          );
+                          return Theme(data: Theme.of(context), child: child!);
                         },
                       );
                       if (date == null) return;
-
                       if (!context.mounted) return;
                       final TimeOfDay? time = await showTimePicker(
                         context: context,
                         initialTime: TimeOfDay.fromDateTime(selectedDate),
                         builder: (context, child) {
-                          return Theme(
-                            data: ThemeData.dark().copyWith(
-                              colorScheme: const ColorScheme.dark(
-                                primary: Color(0xFF00C897),
-                                onPrimary: Colors.white,
-                                surface: Color(0xFF222222),
-                                onSurface: Colors.white,
-                              ),
-                            ),
-                            child: child!,
-                          );
+                          return Theme(data: Theme.of(context), child: child!);
                         },
                       );
                       if (time == null) return;
-
                       setDialogState(() {
                         selectedDate = DateTime(
                           date.year,
@@ -243,17 +210,25 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                   const SizedBox(height: 15),
                   TextField(
                     controller: noteController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: const InputDecoration(
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurface,
+                    ),
+                    cursorColor: Theme.of(context).primaryColor,
+                    decoration: InputDecoration(
                       labelText: "Note",
-                      labelStyle: TextStyle(color: Colors.white54),
-                      hintText: "Add details...",
-                      hintStyle: TextStyle(color: Colors.white30),
+                      labelStyle: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
                       enabledBorder: UnderlineInputBorder(
-                        borderSide: BorderSide(color: Color(0xFF00C897)),
+                        borderSide: BorderSide(
+                          color: Theme.of(context).primaryColor,
+                        ),
                       ),
                       focusedBorder: UnderlineInputBorder(
-                        borderSide: BorderSide(color: Color(0xFF00C897)),
+                        borderSide: BorderSide(
+                          color: Theme.of(context).primaryColor,
+                          width: 2,
+                        ),
                       ),
                     ),
                   ),
@@ -261,19 +236,24 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
               ),
               actions: [
                 TextButton(
-                  child: const Text("Cancel"),
+                  child: Text(
+                    "Cancel",
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
                   onPressed: () => Navigator.pop(ctx),
                 ),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF00C897),
+                    backgroundColor: Theme.of(context).primaryColor,
+                    foregroundColor: Colors.black,
                   ),
                   child: const Text("Save"),
                   onPressed: () {
                     String oldEntry = logs[originalIndex];
                     List<String> parts = oldEntry.split('|');
                     while (parts.length < 6) parts.add("");
-
                     String newTimestamp = _formatTimestampForSave(selectedDate);
                     String action = parts[1];
                     String item = parts[2];
@@ -281,10 +261,8 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                     String change = parts[4];
                     String total = parts[5];
                     String newNote = noteController.text.replaceAll('|', '');
-
                     String newEntry =
                         "$newTimestamp|$action|$item|$room|$change|$total|$newNote";
-
                     setState(() {
                       logs[originalIndex] = newEntry;
                     });
@@ -306,17 +284,16 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
     List<String> parts = currentLog.split('|');
     String timestamp = parts[0];
     String currentNote = parts.length > 6 ? parts[6] : "";
-
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF111111),
+      backgroundColor: Theme.of(context).cardColor,
       builder: (ctx) => Wrap(
         children: [
           ListTile(
-            leading: const Icon(Icons.edit, color: Colors.white),
-            title: const Text(
+            leading: Icon(Icons.edit, color: Theme.of(context).iconTheme.color),
+            title: Text(
               "Edit Date / Note",
-              style: TextStyle(color: Colors.white),
+              style: TextStyle(color: Theme.of(context).colorScheme.onSurface),
             ),
             onTap: () {
               Navigator.pop(ctx);
@@ -341,44 +318,48 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     final displayLogs = logs.reversed.toList();
 
     Color getActionColor(String action) {
       if (action.contains("DELETED")) return Colors.redAccent;
       if (action == "USED ONE") return Colors.orangeAccent;
-      if (action == "RESTOCKED" || action == "CREATED")
-        return const Color(0xFF00C897);
-      return Colors.white;
+      // FIX: Added "UPDATED" here so it shows Teal
+      if (action == "RESTOCKED" || action == "CREATED" || action == "UPDATED") {
+        return theme.colorScheme.primary;
+      }
+      return theme.colorScheme.onSurface;
     }
 
     return Scaffold(
-      backgroundColor: const Color(0xFF111111),
+      backgroundColor: theme.scaffoldBackgroundColor,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        iconTheme: const IconThemeData(color: Colors.white),
-        title: const Text(
+        iconTheme: IconThemeData(color: theme.colorScheme.onSurface),
+        title: Text(
           "Activity Log",
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          style: TextStyle(
+            color: theme.colorScheme.onSurface,
+            fontWeight: FontWeight.bold,
+          ),
         ),
         centerTitle: true,
       ),
       body: displayLogs.isEmpty
-          ? const Center(
+          ? Center(
               child: Text(
                 "No activity recorded.",
-                style: TextStyle(color: Colors.white38),
+                style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
               ),
             )
           : ListView.separated(
               padding: const EdgeInsets.all(20),
               itemCount: displayLogs.length,
-              separatorBuilder: (ctx, i) =>
-                  const Divider(color: Colors.white10),
+              separatorBuilder: (ctx, i) => Divider(color: theme.dividerColor),
               itemBuilder: (context, index) {
                 final parts = displayLogs[index].split('|');
                 if (parts.length < 6) return const SizedBox();
-
                 final timestamp = parts[0];
                 final action = parts[1];
                 final item = parts[2];
@@ -386,7 +367,6 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                 final change = parts[4];
                 final total = parts[5];
                 final note = parts.length > 6 ? parts[6] : "";
-
                 String timeDisplay = "";
                 DateTime? dt = _parseTimestamp(timestamp);
                 if (dt != null) {
@@ -409,8 +389,8 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                           width: 60,
                           child: Text(
                             timeDisplay,
-                            style: const TextStyle(
-                              color: Colors.white30,
+                            style: TextStyle(
+                              color: theme.colorScheme.onSurfaceVariant,
                               fontSize: 12,
                             ),
                             textAlign: TextAlign.center,
@@ -432,8 +412,8 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                               const SizedBox(height: 4),
                               Text(
                                 "Room: $room",
-                                style: const TextStyle(
-                                  color: Colors.white54,
+                                style: TextStyle(
+                                  color: theme.colorScheme.onSurfaceVariant,
                                   fontSize: 12,
                                 ),
                               ),
@@ -442,17 +422,17 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                                   padding: const EdgeInsets.only(top: 6.0),
                                   child: Row(
                                     children: [
-                                      const Icon(
+                                      Icon(
                                         Icons.sticky_note_2,
                                         size: 12,
-                                        color: Colors.white30,
+                                        color: theme.disabledColor,
                                       ),
                                       const SizedBox(width: 4),
                                       Expanded(
                                         child: Text(
                                           note,
-                                          style: const TextStyle(
-                                            color: Colors.white70,
+                                          style: TextStyle(
+                                            color: theme.colorScheme.onSurface,
                                             fontSize: 12,
                                             fontStyle: FontStyle.italic,
                                           ),
@@ -476,10 +456,10 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                                         : change),
                               style: TextStyle(
                                 color: change == "-"
-                                    ? Colors.white30
+                                    ? theme.colorScheme.onSurfaceVariant
                                     : (int.tryParse(change) != null &&
                                               int.parse(change) > 0
-                                          ? const Color(0xFF00C897)
+                                          ? theme.colorScheme.primary
                                           : Colors.orangeAccent),
                                 fontWeight: FontWeight.bold,
                                 fontSize: 16,
@@ -487,8 +467,8 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                             ),
                             Text(
                               "Total: $total",
-                              style: const TextStyle(
-                                color: Colors.white30,
+                              style: TextStyle(
+                                color: theme.colorScheme.onSurfaceVariant,
                                 fontSize: 10,
                               ),
                             ),

@@ -1,12 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart'; // Required for 'compute'
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/inventory_item.dart';
-
-// --- BACKGROUND FUNCTIONS ---
 
 DateTime? _parseDateStatic(String dateStr) {
   try {
@@ -36,53 +34,41 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
   final List<String> logs = input['logs'];
   final int runoutThreshold = input['threshold'];
   final Set<String> ignored = Set<String>.from(input['ignored']);
-
   final List<dynamic> jsonList = jsonDecode(invData);
   List<InventoryItem> items = jsonList
       .map((e) => InventoryItem.fromJson(e))
       .toList();
   DateTime now = DateTime.now();
-
   List<Map<String, dynamic>> tempRestock = [];
   List<Map<String, dynamic>> tempUsage = [];
-
   for (var item in items.where((i) => i.type == 'Item')) {
     if (ignored.contains(item.name)) continue;
-
     List<DateTime> usageDates = [];
     for (var line in logs) {
       List<String> parts = line.split('|');
       if (parts.length >= 3) {
         String action = parts[1].trim();
         String name = parts[2].trim();
-
         if (name == item.name && action == "USED ONE") {
           DateTime? dt = _parseDateStatic(parts[0].trim());
           if (dt != null) usageDates.add(dt);
         }
       }
     }
-
     if (usageDates.length >= 2) {
       usageDates.sort();
       DateTime lastUse = usageDates.last;
-
       int totalSpan = lastUse.difference(usageDates.first).inDays;
       if (totalSpan == 0) totalSpan = 1;
       double avgRate = totalSpan / (usageDates.length - 1);
-
-      // CHECK 1: Restock
-      double stockDuration = item.quantity * avgRate;
+      double stockDuration = (item.quantity + 1) * avgRate;
       int daysSinceLast = now.difference(lastUse).inDays;
       int daysLeft = (stockDuration - daysSinceLast).round();
-
       if (daysLeft < runoutThreshold) {
         tempRestock.add({'item': item, 'daysLeft': daysLeft});
       }
-
-      // CHECK 2: Usage
-      double buffer = 1.3;
-      if (daysSinceLast > (avgRate * buffer)) {
+      double bufferMultiplier = 1.5;
+      if (daysSinceLast > (avgRate * bufferMultiplier)) {
         if (item.quantity > 0) {
           tempUsage.add({
             'item': item,
@@ -92,11 +78,9 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
       }
     }
   }
-
   tempRestock.sort(
     (a, b) => (a['daysLeft'] as int).compareTo(b['daysLeft'] as int),
   );
-
   return {'restock': tempRestock, 'usage': tempUsage};
 }
 
@@ -111,11 +95,9 @@ class _HomeTabState extends State<HomeTab> {
   late Timer _timer;
   DateTime _currentTime = DateTime.now();
   bool _isLoading = true;
-
   List<Map<String, dynamic>> _restockAlerts = [];
   List<Map<String, dynamic>> _usageAlerts = [];
   final Set<String> _ignoredUsageAlerts = {};
-
   final Color _themeTeal = const Color(0xFF00C897);
 
   @override
@@ -136,23 +118,27 @@ class _HomeTabState extends State<HomeTab> {
   Future<void> _runSmartLogic() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      List<String>? savedThresholds = prefs.getStringList(
+        'axis_runout_thresholds',
+      );
       int runoutThreshold = 7;
-
+      if (savedThresholds != null && savedThresholds.isNotEmpty) {
+        runoutThreshold = savedThresholds
+            .map((e) => int.parse(e))
+            .reduce((a, b) => a > b ? a : b);
+      }
       final String? invData = prefs.getString('axis_inventory');
       final List<String> logs = prefs.getStringList('axis_activity_log') ?? [];
-
       if (invData == null) {
         if (mounted) setState(() => _isLoading = false);
         return;
       }
-
       final results = await compute(_computeHomeAlerts, {
         'invData': invData,
         'logs': logs,
         'threshold': runoutThreshold,
         'ignored': _ignoredUsageAlerts.toList(),
       });
-
       if (mounted) {
         setState(() {
           _restockAlerts = results['restock']!;
@@ -166,43 +152,44 @@ class _HomeTabState extends State<HomeTab> {
     }
   }
 
-  // --- LOGIC: USAGE CHECK (DATE + APPROXIMATE) ---
+  // ... (Usage/Restock Log Actions - Paster from prior version, assume same logic) ...
+  // Keeping helper functions compact for display...
   Future<void> _processUsageLog(InventoryItem item) async {
     DateTime selectedDate = DateTime.now();
     bool isApproximate = false;
-
-    // 1. Show Date Picker Dialog
     bool? confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              backgroundColor: const Color(0xFF222222),
-              title: const Text(
+              backgroundColor: Theme.of(context).cardColor,
+              title: Text(
                 "Log Usage",
-                style: TextStyle(color: Colors.white),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
               ),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
                     "When did you use 1 '${item.name}'?",
-                    style: const TextStyle(color: Colors.white70),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
                   const SizedBox(height: 20),
                   OutlinedButton.icon(
                     icon: Icon(Icons.calendar_today, color: _themeTeal),
                     label: Text(
                       DateFormat('MMMM d, yyyy').format(selectedDate),
-                      style: const TextStyle(color: Colors.white),
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
                     ),
                     style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Colors.white24),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 20,
-                        vertical: 15,
-                      ),
+                      side: BorderSide(color: Theme.of(context).dividerColor),
                     ),
                     onPressed: () async {
                       final DateTime? picked = await showDatePicker(
@@ -211,16 +198,7 @@ class _HomeTabState extends State<HomeTab> {
                         firstDate: DateTime(2020),
                         lastDate: DateTime.now(),
                         builder: (context, child) {
-                          return Theme(
-                            data: ThemeData.dark().copyWith(
-                              colorScheme: ColorScheme.dark(
-                                primary: _themeTeal,
-                                onPrimary: Colors.white,
-                                surface: const Color(0xFF222222),
-                              ),
-                            ),
-                            child: child!,
-                          );
+                          return Theme(data: Theme.of(context), child: child!);
                         },
                       );
                       if (picked != null) {
@@ -238,8 +216,6 @@ class _HomeTabState extends State<HomeTab> {
                     },
                   ),
                   const SizedBox(height: 15),
-
-                  // APPROXIMATE CHECKBOX
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
@@ -247,13 +223,17 @@ class _HomeTabState extends State<HomeTab> {
                         value: isApproximate,
                         activeColor: _themeTeal,
                         checkColor: Colors.black,
-                        side: const BorderSide(color: Colors.white54),
+                        side: BorderSide(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                         onChanged: (val) =>
                             setDialogState(() => isApproximate = val ?? false),
                       ),
-                      const Text(
+                      Text(
                         "Date is approximate",
-                        style: TextStyle(color: Colors.white70),
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                       ),
                     ],
                   ),
@@ -261,11 +241,19 @@ class _HomeTabState extends State<HomeTab> {
               ),
               actions: [
                 TextButton(
-                  child: const Text("Cancel"),
+                  child: Text(
+                    "Cancel",
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
                   onPressed: () => Navigator.pop(ctx, false),
                 ),
                 ElevatedButton(
-                  style: ElevatedButton.styleFrom(backgroundColor: _themeTeal),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _themeTeal,
+                    foregroundColor: Colors.black,
+                  ),
                   child: const Text("Confirm"),
                   onPressed: () => Navigator.pop(ctx, true),
                 ),
@@ -275,21 +263,16 @@ class _HomeTabState extends State<HomeTab> {
         );
       },
     );
-
     if (confirm != true) return;
-
-    // 2. Perform Database Update
     setState(() => _isLoading = true);
     final prefs = await SharedPreferences.getInstance();
     final String? invData = prefs.getString('axis_inventory');
     final List<String> logs = prefs.getStringList('axis_activity_log') ?? [];
-
     if (invData != null) {
       List<dynamic> jsonList = jsonDecode(invData);
       List<InventoryItem> items = jsonList
           .map((e) => InventoryItem.fromJson(e))
           .toList();
-
       int index = items.indexWhere(
         (i) => i.name == item.name && i.type == 'Item',
       );
@@ -299,20 +282,15 @@ class _HomeTabState extends State<HomeTab> {
           'axis_inventory',
           jsonEncode(items.map((e) => e.toJson()).toList()),
         );
-
         String twoDigits(int n) => n.toString().padLeft(2, '0');
         final String timestamp =
             "${selectedDate.year}-${twoDigits(selectedDate.month)}-${twoDigits(selectedDate.day)} ${twoDigits(selectedDate.hour)}:${twoDigits(selectedDate.minute)}:${twoDigits(selectedDate.second)}";
-
-        // Append note if approximate
         String note = "Logged from Home";
         if (isApproximate) note += " (Approximate Date)";
-
         String logEntry =
             "$timestamp|USED ONE|${item.name}|${item.roomLocation ?? 'Unknown'}|-1|${items[index].quantity}|$note";
         logs.add(logEntry);
         await prefs.setStringList('axis_activity_log', logs);
-
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text("Logged usage for ${item.name}.")),
@@ -324,33 +302,33 @@ class _HomeTabState extends State<HomeTab> {
     }
   }
 
-  // --- LOGIC: RESTOCK ALERT (QUANTITY + DATE + APPROXIMATE) ---
   Future<void> _processRestock(InventoryItem item) async {
     int quantityToAdd = 1;
     DateTime selectedDate = DateTime.now();
     bool isApproximate = false;
-
-    // 1. Show Enhanced Restock Dialog
     bool? confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              backgroundColor: const Color(0xFF222222),
+              backgroundColor: Theme.of(context).cardColor,
               title: Text(
                 "Restock ${item.name}",
-                style: const TextStyle(color: Colors.white),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
               ),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text(
+                  Text(
                     "How many are you adding?",
-                    style: TextStyle(color: Colors.white70),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
                   const SizedBox(height: 15),
-                  // Quantity
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
@@ -359,9 +337,9 @@ class _HomeTabState extends State<HomeTab> {
                           if (quantityToAdd > 1)
                             setDialogState(() => quantityToAdd--);
                         },
-                        icon: const Icon(
+                        icon: Icon(
                           Icons.remove_circle_outline,
-                          color: Colors.white,
+                          color: Theme.of(context).colorScheme.onSurface,
                           size: 32,
                         ),
                       ),
@@ -377,22 +355,23 @@ class _HomeTabState extends State<HomeTab> {
                       const SizedBox(width: 20),
                       IconButton(
                         onPressed: () => setDialogState(() => quantityToAdd++),
-                        icon: const Icon(
+                        icon: Icon(
                           Icons.add_circle_outline,
-                          color: Colors.white,
+                          color: Theme.of(context).colorScheme.onSurface,
                           size: 32,
                         ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 20),
-
-                  // Date Picker
-                  const Align(
+                  Align(
                     alignment: Alignment.centerLeft,
                     child: Text(
                       "Restock Date:",
-                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        fontSize: 12,
+                      ),
                     ),
                   ),
                   const SizedBox(height: 5),
@@ -400,10 +379,12 @@ class _HomeTabState extends State<HomeTab> {
                     icon: Icon(Icons.calendar_today, color: _themeTeal),
                     label: Text(
                       DateFormat('MMMM d, yyyy').format(selectedDate),
-                      style: const TextStyle(color: Colors.white),
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurface,
+                      ),
                     ),
                     style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Colors.white24),
+                      side: BorderSide(color: Theme.of(context).dividerColor),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 20,
                         vertical: 12,
@@ -416,16 +397,7 @@ class _HomeTabState extends State<HomeTab> {
                         firstDate: DateTime(2020),
                         lastDate: DateTime.now(),
                         builder: (context, child) {
-                          return Theme(
-                            data: ThemeData.dark().copyWith(
-                              colorScheme: ColorScheme.dark(
-                                primary: _themeTeal,
-                                onPrimary: Colors.white,
-                                surface: const Color(0xFF222222),
-                              ),
-                            ),
-                            child: child!,
-                          );
+                          return Theme(data: Theme.of(context), child: child!);
                         },
                       );
                       if (picked != null) {
@@ -443,8 +415,6 @@ class _HomeTabState extends State<HomeTab> {
                     },
                   ),
                   const SizedBox(height: 10),
-
-                  // Approximate Checkbox
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
@@ -452,13 +422,17 @@ class _HomeTabState extends State<HomeTab> {
                         value: isApproximate,
                         activeColor: _themeTeal,
                         checkColor: Colors.black,
-                        side: const BorderSide(color: Colors.white54),
+                        side: BorderSide(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                         onChanged: (val) =>
                             setDialogState(() => isApproximate = val ?? false),
                       ),
-                      const Text(
+                      Text(
                         "Date is approximate",
-                        style: TextStyle(color: Colors.white70),
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                       ),
                     ],
                   ),
@@ -466,11 +440,19 @@ class _HomeTabState extends State<HomeTab> {
               ),
               actions: [
                 TextButton(
-                  child: const Text("Cancel"),
+                  child: Text(
+                    "Cancel",
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
                   onPressed: () => Navigator.pop(ctx, false),
                 ),
                 ElevatedButton(
-                  style: ElevatedButton.styleFrom(backgroundColor: _themeTeal),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _themeTeal,
+                    foregroundColor: Colors.black,
+                  ),
                   child: const Text("Restock"),
                   onPressed: () => Navigator.pop(ctx, true),
                 ),
@@ -480,21 +462,16 @@ class _HomeTabState extends State<HomeTab> {
         );
       },
     );
-
     if (confirm != true) return;
-
-    // 2. Update Database
     setState(() => _isLoading = true);
     final prefs = await SharedPreferences.getInstance();
     final String? invData = prefs.getString('axis_inventory');
     final List<String> logs = prefs.getStringList('axis_activity_log') ?? [];
-
     if (invData != null) {
       List<dynamic> jsonList = jsonDecode(invData);
       List<InventoryItem> items = jsonList
           .map((e) => InventoryItem.fromJson(e))
           .toList();
-
       int index = items.indexWhere(
         (i) => i.name == item.name && i.type == 'Item',
       );
@@ -504,19 +481,15 @@ class _HomeTabState extends State<HomeTab> {
           'axis_inventory',
           jsonEncode(items.map((e) => e.toJson()).toList()),
         );
-
         String twoDigits(int n) => n.toString().padLeft(2, '0');
         final String timestamp =
             "${selectedDate.year}-${twoDigits(selectedDate.month)}-${twoDigits(selectedDate.day)} ${twoDigits(selectedDate.hour)}:${twoDigits(selectedDate.minute)}:${twoDigits(selectedDate.second)}";
-
         String note = "Restocked from Home";
         if (isApproximate) note += " (Approximate Date)";
-
         String logEntry =
             "$timestamp|RESTOCKED|${item.name}|${item.roomLocation ?? 'Unknown'}|$quantityToAdd|${items[index].quantity}|$note";
         logs.add(logEntry);
         await prefs.setStringList('axis_activity_log', logs);
-
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text("Added $quantityToAdd to ${item.name}.")),
@@ -542,48 +515,93 @@ class _HomeTabState extends State<HomeTab> {
 
   @override
   Widget build(BuildContext context) {
-    List<Widget> dynamicTiles = [];
+    final theme = Theme.of(context);
+    final bool isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+    final double topPadding = isLandscape ? 20.0 : 140.0;
 
+    List<Widget> dynamicTiles = [];
     for (var alert in _restockAlerts) {
       dynamicTiles.add(
         _buildRestockAlert(
+          theme,
           alert['item'] as InventoryItem,
           alert['daysLeft'] as int,
         ),
       );
     }
-
     for (var alert in _usageAlerts) {
       dynamicTiles.add(
         _buildUsageCheckAlert(
+          theme,
           alert['item'] as InventoryItem,
           alert['expectedDate'] as DateTime,
         ),
       );
     }
-
     if (dynamicTiles.isEmpty && !_isLoading) {
-      dynamicTiles.add(_buildAllClearTile());
+      dynamicTiles.add(_buildAllClearTile(theme));
     }
 
     return Padding(
-      padding: const EdgeInsets.only(top: 140, left: 20, right: 20, bottom: 20),
+      padding: EdgeInsets.only(
+        top: topPadding,
+        left: 20,
+        right: 20,
+        bottom: 20,
+      ),
       child: _isLoading
-          ? Center(child: CircularProgressIndicator(color: _themeTeal))
-          : ListView(
+          ? Center(
+              child: CircularProgressIndicator(
+                color: theme.colorScheme.primary,
+              ),
+            )
+          : SingleChildScrollView(
               padding: EdgeInsets.zero,
-              children: [
-                _buildHeroTile(),
-                const SizedBox(height: 20),
-                ...dynamicTiles,
-              ],
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildHeroTile(theme),
+                  const SizedBox(height: 20),
+                  if (dynamicTiles.length > 1 ||
+                      (dynamicTiles.isNotEmpty &&
+                          dynamicTiles[0].key != const Key('all_clear')))
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 15, left: 5),
+                      child: Text(
+                        "INSIGHTS",
+                        style: TextStyle(
+                          color: theme.colorScheme.onSurfaceVariant,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 2.0,
+                        ),
+                      ),
+                    ),
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      int columns = constraints.maxWidth > 600 ? 2 : 1;
+                      if (columns == 1) return Column(children: dynamicTiles);
+                      double spacing = 15.0;
+                      double cardWidth =
+                          (constraints.maxWidth - (spacing * (columns - 1))) /
+                          columns;
+                      return Wrap(
+                        spacing: spacing,
+                        runSpacing: spacing,
+                        children: dynamicTiles
+                            .map((w) => SizedBox(width: cardWidth, child: w))
+                            .toList(),
+                      );
+                    },
+                  ),
+                ],
+              ),
             ),
     );
   }
 
-  // --- WIDGETS ---
-
-  Widget _buildHeroTile() {
+  Widget _buildHeroTile(ThemeData theme) {
     String timeString = DateFormat('h:mm').format(_currentTime);
     String amPm = DateFormat('a').format(_currentTime);
     String dateString = DateFormat('MMMM d, y').format(_currentTime);
@@ -592,12 +610,12 @@ class _HomeTabState extends State<HomeTab> {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 20),
       decoration: BoxDecoration(
-        color: const Color(0xFF222222),
+        color: theme.cardColor,
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Colors.white10),
+        border: Border.all(color: theme.dividerColor),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.3),
+            color: Colors.black.withOpacity(0.1),
             blurRadius: 15,
             offset: const Offset(0, 5),
           ),
@@ -612,10 +630,10 @@ class _HomeTabState extends State<HomeTab> {
             children: [
               Text(
                 timeString,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 70,
                   fontWeight: FontWeight.bold,
-                  color: Colors.white,
+                  color: theme.colorScheme.onSurface,
                   letterSpacing: -2,
                   height: 1,
                 ),
@@ -626,37 +644,36 @@ class _HomeTabState extends State<HomeTab> {
                 style: TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.w600,
-                  color: _themeTeal,
+                  color: theme.colorScheme.primary,
                 ),
               ),
             ],
           ),
           const SizedBox(height: 10),
-          Container(height: 2, width: 60, color: Colors.white12),
+          Container(height: 2, width: 60, color: theme.dividerColor),
           const SizedBox(height: 10),
           Text(
             dayString.toUpperCase(),
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 14,
               letterSpacing: 3.0,
-              color: Colors.white54,
+              color: theme.colorScheme.onSurfaceVariant,
               fontWeight: FontWeight.bold,
             ),
           ),
           const SizedBox(height: 4),
           Text(
             dateString,
-            style: const TextStyle(fontSize: 18, color: Colors.white),
+            style: TextStyle(fontSize: 18, color: theme.colorScheme.onSurface),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildRestockAlert(InventoryItem item, int daysLeft) {
+  Widget _buildRestockAlert(ThemeData theme, InventoryItem item, int daysLeft) {
     Color color = Colors.redAccent;
     List<TextSpan> textSpans;
-
     if (daysLeft <= 0) {
       textSpans = [
         TextSpan(
@@ -685,12 +702,11 @@ class _HomeTabState extends State<HomeTab> {
         const TextSpan(text: "."),
       ];
     }
-
     return Container(
       margin: const EdgeInsets.only(bottom: 15),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
+        color: color.withOpacity(0.1),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: color.withOpacity(0.5)),
       ),
@@ -712,7 +728,7 @@ class _HomeTabState extends State<HomeTab> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      "Restock Needed",
+                      "RESTOCK NEEDED",
                       style: TextStyle(
                         color: color,
                         fontWeight: FontWeight.bold,
@@ -723,9 +739,10 @@ class _HomeTabState extends State<HomeTab> {
                     const SizedBox(height: 4),
                     RichText(
                       text: TextSpan(
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
+                        style: TextStyle(
+                          color: theme.colorScheme.onSurface,
+                          fontSize: 16,
+                          height: 1.2,
                         ),
                         children: textSpans,
                       ),
@@ -739,12 +756,16 @@ class _HomeTabState extends State<HomeTab> {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              icon: const Icon(Icons.add_shopping_cart),
-              label: const Text("Restock Now"),
+              icon: const Icon(Icons.add_shopping_cart, color: Colors.white),
+              label: const Text(
+                "Restock Now",
+                style: TextStyle(color: Colors.white),
+              ),
               style: ElevatedButton.styleFrom(
                 backgroundColor: color,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
               onPressed: () => _processRestock(item),
             ),
@@ -754,15 +775,18 @@ class _HomeTabState extends State<HomeTab> {
     );
   }
 
-  Widget _buildUsageCheckAlert(InventoryItem item, DateTime expectedDate) {
-    Color color = _themeTeal;
+  Widget _buildUsageCheckAlert(
+    ThemeData theme,
+    InventoryItem item,
+    DateTime expectedDate,
+  ) {
+    Color color = theme.colorScheme.primary;
     String dateStr = DateFormat('MMM d').format(expectedDate);
-
     return Container(
       margin: const EdgeInsets.only(bottom: 15),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: const Color(0xFF222222),
+        color: theme.cardColor,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: color.withOpacity(0.5)),
       ),
@@ -773,7 +797,7 @@ class _HomeTabState extends State<HomeTab> {
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: color.withOpacity(0.2),
+                  color: color.withOpacity(0.1),
                   shape: BoxShape.circle,
                 ),
                 child: Icon(Icons.history_edu, color: color, size: 28),
@@ -784,7 +808,7 @@ class _HomeTabState extends State<HomeTab> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      "Usage Check",
+                      "USAGE CHECK",
                       style: TextStyle(
                         color: color,
                         fontWeight: FontWeight.bold,
@@ -795,8 +819,8 @@ class _HomeTabState extends State<HomeTab> {
                     const SizedBox(height: 4),
                     Text(
                       "Did you use ${item.name}?",
-                      style: const TextStyle(
-                        color: Colors.white,
+                      style: TextStyle(
+                        color: theme.colorScheme.onSurface,
                         fontSize: 18,
                         fontWeight: FontWeight.bold,
                       ),
@@ -805,7 +829,7 @@ class _HomeTabState extends State<HomeTab> {
                     Text(
                       "Expected usage was around $dateStr",
                       style: TextStyle(
-                        color: Colors.white.withOpacity(0.7),
+                        color: theme.colorScheme.onSurfaceVariant,
                         fontSize: 14,
                       ),
                     ),
@@ -821,8 +845,11 @@ class _HomeTabState extends State<HomeTab> {
                 child: OutlinedButton(
                   onPressed: () => _dismissUsageAlert(item, false),
                   style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: Colors.white24),
-                    foregroundColor: Colors.white70,
+                    side: BorderSide(color: theme.dividerColor),
+                    foregroundColor: theme.colorScheme.onSurfaceVariant,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                   child: const Text("No / Ignore"),
                 ),
@@ -834,6 +861,9 @@ class _HomeTabState extends State<HomeTab> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: color,
                     foregroundColor: Colors.black,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                   child: const Text("Yes, I did"),
                 ),
@@ -845,30 +875,35 @@ class _HomeTabState extends State<HomeTab> {
     );
   }
 
-  Widget _buildAllClearTile() {
+  Widget _buildAllClearTile(ThemeData theme) {
     return Container(
+      key: const Key('all_clear'),
       padding: const EdgeInsets.all(30),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.05),
+        color: theme.cardColor.withOpacity(0.5),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white10),
+        border: Border.all(color: theme.dividerColor),
       ),
       child: Column(
         children: [
-          Icon(Icons.check_circle_outline, color: _themeTeal, size: 40),
+          Icon(
+            Icons.check_circle_outline,
+            color: theme.colorScheme.primary,
+            size: 40,
+          ),
           const SizedBox(height: 10),
-          const Text(
+          Text(
             "All Systems Normal",
             style: TextStyle(
-              color: Colors.white,
+              color: theme.colorScheme.onSurface,
               fontWeight: FontWeight.bold,
               fontSize: 16,
             ),
           ),
           const SizedBox(height: 5),
-          const Text(
+          Text(
             "No immediate actions required.",
-            style: TextStyle(color: Colors.white54),
+            style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
           ),
         ],
       ),
