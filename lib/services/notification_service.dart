@@ -18,106 +18,114 @@ class NotificationService {
       StreamController<String?>.broadcast();
 
   Future<void> init() async {
-    tz.initializeTimeZones();
-    String timeZoneName;
     try {
-      timeZoneName = await FlutterTimezone.getLocalTimezone();
+      tz.initializeTimeZones();
+      String timeZoneName;
+      try {
+        timeZoneName = await FlutterTimezone.getLocalTimezone();
+      } catch (e) {
+        timeZoneName = 'America/Chicago';
+      }
+      try {
+        tz.setLocalLocation(tz.getLocation(timeZoneName));
+      } catch (e) {
+        tz.setLocalLocation(tz.getLocation('America/Chicago'));
+      }
+
+      // Use 'notification_icon' from res/drawable (User's custom icon)
+      const AndroidInitializationSettings initializationSettingsAndroid =
+          AndroidInitializationSettings('notification_icon');
+
+      const DarwinInitializationSettings initializationSettingsDarwin =
+          DarwinInitializationSettings(
+            requestSoundPermission: true,
+            requestBadgePermission: true,
+            requestAlertPermission: true,
+          );
+
+      const InitializationSettings initializationSettings =
+          InitializationSettings(
+            android: initializationSettingsAndroid,
+            iOS: initializationSettingsDarwin,
+          );
+
+      await flutterLocalNotificationsPlugin.initialize(
+        initializationSettings,
+        onDidReceiveNotificationResponse: (NotificationResponse response) {
+          selectNotificationStream.add(response.payload);
+        },
+      );
+      debugPrint("✅ NotificationService: Initialized successfully");
+
+      await requestPermissions();
     } catch (e) {
-      timeZoneName = 'America/Chicago';
+      debugPrint("❌ NotificationService Init Failed: $e");
     }
-    try {
-      tz.setLocalLocation(tz.getLocation(timeZoneName));
-    } catch (e) {
-      tz.setLocalLocation(tz.getLocation('America/Chicago'));
-    }
-
-    // CHANGED: Now looks for 'notification_icon'
-    const AndroidInitializationSettings initializationSettingsAndroid =
-        AndroidInitializationSettings('notification_icon');
-
-    const DarwinInitializationSettings initializationSettingsDarwin =
-        DarwinInitializationSettings(
-          requestSoundPermission: true,
-          requestBadgePermission: true,
-          requestAlertPermission: true,
-        );
-
-    const InitializationSettings initializationSettings =
-        InitializationSettings(
-          android: initializationSettingsAndroid,
-          iOS: initializationSettingsDarwin,
-        );
-
-    await flutterLocalNotificationsPlugin.initialize(
-      initializationSettings,
-      onDidReceiveNotificationResponse: (NotificationResponse response) {
-        selectNotificationStream.add(response.payload);
-      },
-    );
   }
 
   Future<void> requestPermissions() async {
-    if (Platform.isAndroid) {
-      await flutterLocalNotificationsPlugin
-          .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin
-          >()
-          ?.requestNotificationsPermission();
-    } else if (Platform.isIOS) {
-      await flutterLocalNotificationsPlugin
-          .resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin
-          >()
-          ?.requestPermissions(alert: true, badge: true, sound: true);
+    try {
+      if (Platform.isAndroid) {
+        await flutterLocalNotificationsPlugin
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >()
+            ?.requestNotificationsPermission();
+      } else if (Platform.isIOS) {
+        await flutterLocalNotificationsPlugin
+            .resolvePlatformSpecificImplementation<
+              IOSFlutterLocalNotificationsPlugin
+            >()
+            ?.requestPermissions(alert: true, badge: true, sound: true);
+      }
+    } catch (e) {
+      debugPrint("❌ Permission Request Error: $e");
     }
-  }
-
-  Future<String?> getLaunchPayload() async {
-    final NotificationAppLaunchDetails? details =
-        await flutterLocalNotificationsPlugin.getNotificationAppLaunchDetails();
-    if (details?.didNotificationLaunchApp ?? false) {
-      return details?.notificationResponse?.payload;
-    }
-    return null;
   }
 
   // --- NIGHT DEBRIEF ---
   Future<void> scheduleDebrief(TimeOfDay time) async {
-    final tz.TZDateTime nowLocal = tz.TZDateTime.now(tz.local);
-    tz.TZDateTime scheduledDate = tz.TZDateTime(
-      tz.local,
-      nowLocal.year,
-      nowLocal.month,
-      nowLocal.day,
-      time.hour,
-      time.minute,
-    );
+    try {
+      final tz.TZDateTime nowLocal = tz.TZDateTime.now(tz.local);
 
-    if (scheduledDate.isBefore(nowLocal)) {
-      scheduledDate = scheduledDate.add(const Duration(days: 1));
-    }
+      tz.TZDateTime scheduledDate = tz.TZDateTime(
+        tz.local,
+        nowLocal.year,
+        nowLocal.month,
+        nowLocal.day,
+        time.hour,
+        time.minute,
+      );
 
-    await flutterLocalNotificationsPlugin.zonedSchedule(
-      0,
-      'Axis Debrief',
-      'Time to review your day.',
-      scheduledDate,
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'axis_daily_channel_v3',
-          'Daily Debrief',
-          importance: Importance.max,
-          priority: Priority.high,
-          icon: 'notification_icon', // CHANGED HERE
+      if (scheduledDate.isBefore(nowLocal)) {
+        scheduledDate = scheduledDate.add(const Duration(days: 1));
+      }
+
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        0,
+        'Axis Debrief',
+        'Time to review your day.',
+        scheduledDate,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'axis_channel_v4',
+            'Axis Notifications',
+            importance: Importance.max,
+            priority: Priority.high,
+            icon: 'notification_icon',
+          ),
+          iOS: DarwinNotificationDetails(),
         ),
-        iOS: DarwinNotificationDetails(),
-      ),
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-      matchDateTimeComponents: DateTimeComponents.time,
-      payload: 'night_debrief',
-    );
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.time,
+        payload: 'night_debrief',
+      );
+      debugPrint("✅ Scheduled Daily Debrief for $scheduledDate");
+    } catch (e) {
+      debugPrint("❌ Failed to schedule debrief: $e");
+    }
   }
 
   // --- SMART ALERTS ---
@@ -129,45 +137,52 @@ class NotificationService {
     required TimeOfDay time,
     required String payload,
   }) async {
-    final tz.TZDateTime nowLocal = tz.TZDateTime.now(tz.local);
+    try {
+      final tz.TZDateTime nowLocal = tz.TZDateTime.now(tz.local);
 
-    tz.TZDateTime scheduledDate = tz.TZDateTime(
-      tz.local,
-      date.year,
-      date.month,
-      date.day,
-      time.hour,
-      time.minute,
-    );
+      tz.TZDateTime scheduledDate = tz.TZDateTime(
+        tz.local,
+        date.year,
+        date.month,
+        date.day,
+        time.hour,
+        time.minute,
+      );
 
-    if (scheduledDate.isBefore(nowLocal)) return;
+      // PRODUCTION MODE: If time passed, move to tomorrow
+      if (scheduledDate.isBefore(nowLocal)) {
+        scheduledDate = scheduledDate.add(const Duration(days: 1));
+      }
 
-    await flutterLocalNotificationsPlugin.zonedSchedule(
-      id,
-      title,
-      body,
-      scheduledDate,
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'axis_smart_alerts',
-          'Inventory Alerts',
-          importance: Importance.max,
-          priority: Priority.high,
-          icon: 'notification_icon', // CHANGED HERE
+      await flutterLocalNotificationsPlugin.zonedSchedule(
+        id,
+        title,
+        body,
+        scheduledDate,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'axis_channel_v4',
+            'Axis Notifications',
+            importance: Importance.max,
+            priority: Priority.high,
+            icon: 'notification_icon',
+          ),
+          iOS: DarwinNotificationDetails(),
         ),
-        iOS: DarwinNotificationDetails(),
-      ),
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-      payload: payload,
-    );
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        payload: payload,
+      );
 
-    debugPrint("🔔 Scheduled '$title' for $scheduledDate");
+      debugPrint("🔔 Scheduled '$title' for $scheduledDate (ID: $id)");
+    } catch (e) {
+      debugPrint("❌ Failed to schedule smart alert: $e");
+    }
   }
 
   Future<void> cancelDebrief() async {
     await flutterLocalNotificationsPlugin.cancel(0);
-    debugPrint("Cancelled daily debrief");
+    debugPrint("🚫 Cancelled daily debrief");
   }
 }

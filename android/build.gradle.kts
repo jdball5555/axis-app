@@ -1,3 +1,16 @@
+// START: Google Services Configuration
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // This line is critical for Firebase
+        classpath("com.google.gms:google-services:4.4.2")
+    }
+}
+// END: Google Services Configuration
+
 allprojects {
     repositories {
         google()
@@ -5,10 +18,7 @@ allprojects {
     }
 }
 
-val newBuildDir: Directory =
-    rootProject.layout.buildDirectory
-        .dir("../../build")
-        .get()
+val newBuildDir: Directory = rootProject.layout.buildDirectory.dir("../../build").get()
 rootProject.layout.buildDirectory.value(newBuildDir)
 
 subprojects {

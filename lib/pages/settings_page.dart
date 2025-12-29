@@ -1,6 +1,8 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../models/tab_data.dart';
+// REMOVED unused notification_service import to fix yellow warning
 
 class SettingsSheet extends StatefulWidget {
   final bool isLightMode;
@@ -140,15 +142,71 @@ class _SettingsSheetState extends State<SettingsSheet> {
     TimeOfDay initial,
     Function(TimeOfDay) onPicked,
   ) async {
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: initial,
-      builder: (context, child) {
-        return Theme(data: Theme.of(context), child: child!);
-      },
-    );
-    if (picked != null) {
-      setState(() => onPicked(picked));
+    final theme = Theme.of(context);
+    final primary = widget.currentPrimaryColor;
+    final bg = theme.cardColor;
+    final onBg = theme.colorScheme.onSurface;
+
+    try {
+      final picked = await showTimePicker(
+        context: context,
+        initialTime: initial,
+        builder: (context, child) {
+          return Theme(
+            data: theme.copyWith(
+              colorScheme: theme.colorScheme.copyWith(
+                primary: primary,
+                onPrimary: Colors.black,
+                surface: bg,
+                onSurface: onBg,
+                surfaceTint: Colors.transparent,
+              ),
+              timePickerTheme: TimePickerThemeData(
+                backgroundColor: bg,
+                dialHandColor: primary,
+                dialBackgroundColor: theme.scaffoldBackgroundColor,
+                hourMinuteTextColor: MaterialStateColor.resolveWith(
+                  (states) =>
+                      states.contains(MaterialState.selected) ? primary : onBg,
+                ),
+                hourMinuteColor: MaterialStateColor.resolveWith(
+                  (states) => states.contains(MaterialState.selected)
+                      ? primary.withOpacity(0.1)
+                      : theme.scaffoldBackgroundColor,
+                ),
+                dayPeriodTextColor: MaterialStateColor.resolveWith(
+                  (states) => states.contains(MaterialState.selected)
+                      ? Colors.black
+                      : onBg,
+                ),
+                dayPeriodColor: MaterialStateColor.resolveWith(
+                  (states) => states.contains(MaterialState.selected)
+                      ? primary
+                      : Colors.transparent,
+                ),
+                entryModeIconColor: primary,
+                helpTextStyle: TextStyle(color: onBg),
+                dayPeriodBorderSide: BorderSide(color: primary),
+                hourMinuteShape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  side: BorderSide(color: primary.withOpacity(0.5)),
+                ),
+              ),
+              textButtonTheme: TextButtonThemeData(
+                style: TextButton.styleFrom(foregroundColor: primary),
+              ),
+            ),
+            child: child!,
+          );
+        },
+      );
+
+      if (!mounted) return;
+      if (picked != null) {
+        setState(() => onPicked(picked));
+      }
+    } catch (e) {
+      debugPrint("Error showing time picker: $e");
     }
   }
 
@@ -326,152 +384,163 @@ class _SettingsSheetState extends State<SettingsSheet> {
     );
   }
 
-  // --- ABOUT DIALOG ---
   void _showAboutDialog(BuildContext context) {
     final theme = Theme.of(context);
-    showDialog(
-      context: context,
-      builder: (ctx) => Dialog(
-        backgroundColor: theme.cardColor,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
+    final isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+
+    Widget identitySection = Column(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Container(
+          width: 80,
+          height: 80,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.black,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: theme.colorScheme.primary.withOpacity(0.5),
+              width: 2,
+            ),
+          ),
+          child: ClipOval(
+            child: Image.asset(
+              'assets/icon.png',
+              fit: BoxFit.cover,
+              errorBuilder: (c, e, s) =>
+                  Icon(Icons.hub, size: 40, color: theme.colorScheme.primary),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          "Axis",
+          style: TextStyle(
+            color: theme.colorScheme.onSurface,
+            fontSize: 26,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 1,
+          ),
+        ),
+        Container(
+          margin: const EdgeInsets.only(top: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: theme.dividerColor,
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text(
+            "v${widget.appVersion}", // FIXED: Uses variable from main.dart
+            style: TextStyle(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontSize: 10,
+            ),
+          ),
+        ),
+      ],
+    );
+
+    Widget infoSection = Column(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _buildAboutFeature(theme, Icons.privacy_tip_outlined, "Local"),
+            _buildAboutFeature(theme, Icons.notifications_active, "Alerts"),
+            _buildAboutFeature(theme, Icons.grid_view_rounded, "Modular"),
+          ],
+        ),
+        const SizedBox(height: 20),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: theme.scaffoldBackgroundColor,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: theme.dividerColor.withOpacity(0.2)),
+          ),
           child: Column(
-            mainAxisSize: MainAxisSize.min,
             children: [
-              Container(
-                width: 80,
-                height: 80,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: theme.colorScheme.primary.withOpacity(0.5),
-                    width: 2,
-                  ),
-                ),
-                child: ClipOval(
-                  child: Image.asset(
-                    'assets/icon.png',
-                    fit: BoxFit.cover,
-                    errorBuilder: (c, e, s) => Icon(
-                      Icons.hub,
-                      size: 40,
-                      color: theme.colorScheme.primary,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
               Text(
-                "Axis",
+                "What's New",
                 style: TextStyle(
-                  color: theme.colorScheme.onSurface,
-                  fontSize: 26,
+                  color: theme.colorScheme.primary,
                   fontWeight: FontWeight.bold,
-                  letterSpacing: 1,
+                  fontSize: 12,
                 ),
               ),
-              Container(
-                margin: const EdgeInsets.symmetric(vertical: 8),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 4,
-                ),
-                decoration: BoxDecoration(
-                  color: theme.dividerColor,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  "v0.3.0",
-                  style: TextStyle(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    fontSize: 10,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-
-              // Icons Moved ABOVE What's New
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  _buildAboutFeature(
-                    theme,
-                    Icons.privacy_tip_outlined,
-                    "Local Data",
-                  ),
-                  _buildAboutFeature(
-                    theme,
-                    Icons.notifications_active,
-                    "Smart Alerts",
-                  ),
-                  _buildAboutFeature(theme, Icons.grid_view_rounded, "Modular"),
-                ],
-              ),
-
-              const SizedBox(height: 20),
-
-              // What's New moved BELOW icons
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: theme.scaffoldBackgroundColor,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Column(
-                  children: [
-                    Text(
-                      "What's New",
-                      style: TextStyle(
-                        color: theme.colorScheme.primary,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      "• Horizontal Integration\n• Dark & Light Animation\n• Color Options",
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: theme.colorScheme.onSurfaceVariant,
-                        fontSize: 11,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: theme.dividerColor,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(15),
-                    ),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                  ),
-                  child: Text(
-                    "Close",
-                    style: TextStyle(color: theme.colorScheme.onSurface),
-                  ),
-                  onPressed: () => Navigator.pop(ctx),
+              const SizedBox(height: 8),
+              Text(
+                "• Database Integration\n• Additional Item Stats Display\n• Cloud Sync",
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontSize: 11,
+                  height: 1.4,
                 ),
               ),
             ],
+          ),
+        ),
+      ],
+    );
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: theme.cardColor,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
+        contentPadding: const EdgeInsets.all(24),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(
+              "Close",
+              style: TextStyle(color: theme.colorScheme.primary),
+            ),
+          ),
+        ],
+        content: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: 500,
+            maxHeight: isLandscape ? 300 : 500,
+          ),
+          child: SingleChildScrollView(
+            child: isLandscape
+                ? Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(flex: 2, child: identitySection),
+                      const SizedBox(width: 24),
+                      Container(
+                        width: 1,
+                        height: 150,
+                        color: theme.dividerColor,
+                      ),
+                      const SizedBox(width: 24),
+                      Expanded(flex: 3, child: infoSection),
+                    ],
+                  )
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      identitySection,
+                      const SizedBox(height: 30),
+                      infoSection,
+                    ],
+                  ),
           ),
         ),
       ),
     );
   }
 
-  // --- CSV VIEWER DIALOG ---
   void _showCSVFormatsDialog(BuildContext context) {
     final theme = Theme.of(context);
-
     DataColumn buildCol(String label) => DataColumn(
       label: Text(
         label,
@@ -481,7 +550,6 @@ class _SettingsSheetState extends State<SettingsSheet> {
         ),
       ),
     );
-
     DataRow buildRow(List<String> cells) => DataRow(
       cells: cells
           .map(
@@ -500,7 +568,6 @@ class _SettingsSheetState extends State<SettingsSheet> {
         insetPadding: const EdgeInsets.all(16),
         child: Container(
           padding: const EdgeInsets.all(20),
-          // Constrain height so it doesn't overflow screen
           constraints: BoxConstraints(
             maxHeight: MediaQuery.of(context).size.height * 0.8,
           ),
@@ -516,8 +583,6 @@ class _SettingsSheetState extends State<SettingsSheet> {
                 ),
               ),
               const SizedBox(height: 20),
-
-              // Scrollable Content
               Flexible(
                 child: SingleChildScrollView(
                   child: Column(
@@ -621,7 +686,6 @@ class _SettingsSheetState extends State<SettingsSheet> {
                   ),
                 ),
               ),
-
               const SizedBox(height: 20),
               SizedBox(
                 width: double.infinity,
@@ -805,6 +869,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final user = FirebaseAuth.instance.currentUser;
 
     return Container(
       height: MediaQuery.of(context).size.height * 0.9,
@@ -839,6 +904,43 @@ class _SettingsSheetState extends State<SettingsSheet> {
           Expanded(
             child: ListView(
               children: [
+                // --- ACCOUNT SECTION ---
+                Text(
+                  "ACCOUNT",
+                  style: TextStyle(
+                    color: theme.colorScheme.primary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                _buildSection(theme, [
+                  ListTile(
+                    leading: Icon(
+                      Icons.email_outlined,
+                      color: theme.iconTheme.color,
+                    ),
+                    title: Text(
+                      user?.email ?? "Not Logged In",
+                      style: TextStyle(color: theme.colorScheme.onSurface),
+                    ),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.logout, color: Colors.redAccent),
+                    title: const Text(
+                      "Sign Out",
+                      style: TextStyle(color: Colors.redAccent),
+                    ),
+                    onTap: () async {
+                      await FirebaseAuth.instance.signOut();
+                      if (context.mounted) Navigator.pop(context);
+                    },
+                  ),
+                ]),
+                const SizedBox(height: 30),
+
+                // --- APPEARANCE ---
                 Text(
                   "APPEARANCE",
                   style: TextStyle(
@@ -1080,7 +1182,6 @@ class _SettingsSheetState extends State<SettingsSheet> {
                       "View CSV Formats",
                       style: TextStyle(color: theme.disabledColor),
                     ),
-                    // Toggle to CSV View DIALOG
                     onTap: () => _showCSVFormatsDialog(context),
                   ),
                 ]),
@@ -1115,7 +1216,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
                       style: TextStyle(color: theme.iconTheme.color),
                     ),
                     trailing: Text(
-                      "v0.3.0",
+                      "v${widget.appVersion}", // FIXED: Uses variable from main.dart
                       style: TextStyle(
                         color: theme.colorScheme.onSurfaceVariant,
                       ),
@@ -1132,7 +1233,6 @@ class _SettingsSheetState extends State<SettingsSheet> {
   }
 }
 
-// --- COLOR WHEEL PICKER WIDGET ---
 class ColorWheelPicker extends StatefulWidget {
   final Color initialColor;
   final ValueChanged<Color> onColorChanged;
@@ -1211,7 +1311,6 @@ class ColorWheelPainter extends CustomPainter {
     final radius = size.width / 2;
     final rect = Rect.fromCircle(center: center, radius: radius);
 
-    // Smoother gradient avoiding the harsh "Error Magenta" (0xFFFF00FF)
     final hueSweep = SweepGradient(
       colors: [
         Colors.red,
@@ -1220,8 +1319,8 @@ class ColorWheelPainter extends CustomPainter {
         Colors.green,
         Colors.cyan,
         Colors.blue,
-        Colors.purple, // Bridge to red using Purple
-        Colors.pink, // ... and Pink
+        Colors.purple,
+        Colors.pink,
         Colors.red,
       ],
       stops: const [0.0, 0.1, 0.2, 0.4, 0.5, 0.6, 0.75, 0.9, 1.0],
@@ -1236,7 +1335,6 @@ class ColorWheelPainter extends CustomPainter {
     final satPaint = Paint()..shader = satRadial.createShader(rect);
     canvas.drawCircle(center, radius, satPaint);
 
-    // Draw Selector
     final hueAngle = (selectedColor.hue / 360) * 2 * pi;
     final saturationRadius = selectedColor.saturation * radius;
 
