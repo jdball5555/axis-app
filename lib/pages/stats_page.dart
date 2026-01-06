@@ -1,12 +1,18 @@
 import 'dart:async';
-import 'dart:ui' as ui; // Added to fix TextDirection error
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../services/firestore_service.dart';
 import '../models/inventory_item.dart';
 
 class StatsPage extends StatefulWidget {
   const StatsPage({super.key});
+
+  // CACHE: Remembers title to prevent flickering
+  static String? lastKnownName;
+  static bool lastKnownShared = false;
+
   @override
   State<StatsPage> createState() => _StatsPageState();
 }
@@ -36,9 +42,16 @@ class ConsumptionData {
 class _StatsPageState extends State<StatsPage>
     with AutomaticKeepAliveClientMixin {
   final FirestoreService _db = FirestoreService();
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   late Stream<List<InventoryItem>> _inventoryStream;
   late Stream<List<Map<String, dynamic>>> _logStream;
+
+  // Title Logic
+  StreamSubscription<DocumentSnapshot>? _householdSub;
+  String _currentSubscribedId = "";
+  String _householdName = StatsPage.lastKnownName ?? "My Inventory";
+  bool _isShared = StatsPage.lastKnownShared;
 
   @override
   bool get wantKeepAlive => true;
@@ -48,6 +61,51 @@ class _StatsPageState extends State<StatsPage>
     super.initState();
     _inventoryStream = _db.getInventoryStream();
     _logStream = _db.getLogStream();
+    _checkForHouseholdUpdate();
+  }
+
+  @override
+  void didUpdateWidget(StatsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _checkForHouseholdUpdate();
+  }
+
+  @override
+  void dispose() {
+    _householdSub?.cancel();
+    super.dispose();
+  }
+
+  void _checkForHouseholdUpdate() {
+    final newId = _db.currentHouseholdId;
+    if (newId == null || newId == _currentSubscribedId) return;
+
+    _householdSub?.cancel();
+    _currentSubscribedId = newId;
+
+    _householdSub = _firestore
+        .collection('households')
+        .doc(newId)
+        .snapshots()
+        .listen((snapshot) {
+          if (snapshot.exists && snapshot.data() != null) {
+            final data = snapshot.data() as Map<String, dynamic>;
+            final newName = data['name'] ?? "My Inventory";
+            final List members = data['members'] ?? [];
+            final newShared = members.length > 1;
+
+            // Update Cache
+            StatsPage.lastKnownName = newName;
+            StatsPage.lastKnownShared = newShared;
+
+            if (mounted) {
+              setState(() {
+                _householdName = newName;
+                _isShared = newShared;
+              });
+            }
+          }
+        });
   }
 
   DateTime? _parseDate(String dateStr) {
@@ -79,6 +137,61 @@ class _StatsPageState extends State<StatsPage>
     return "${d.month}/${d.day}/${d.year}";
   }
 
+  void _showMembersDialog(String householdId) {
+    showDialog(
+      context: context,
+      builder: (ctx) => FutureBuilder<DocumentSnapshot>(
+        future: _firestore.collection('households').doc(householdId).get(),
+        builder: (context, snap) {
+          if (!snap.hasData) return const SizedBox();
+          final data = snap.data!.data() as Map<String, dynamic>;
+          final ownerId = data['owner'];
+
+          return FutureBuilder<List<Map<String, dynamic>>>(
+            future: _db.getHouseholdMembers(householdId),
+            builder: (context, membersSnap) {
+              if (!membersSnap.hasData)
+                return const AlertDialog(
+                  content: SizedBox(
+                    height: 50,
+                    child: Center(child: CircularProgressIndicator()),
+                  ),
+                );
+              final members = membersSnap.data!;
+
+              return AlertDialog(
+                title: const Text("Shared With"),
+                content: SizedBox(
+                  width: double.maxFinite,
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: members.length,
+                    separatorBuilder: (c, i) => const Divider(),
+                    itemBuilder: (c, i) => ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(members[i]['displayName']),
+                      subtitle: Text(
+                        members[i]['uid'] == ownerId
+                            ? "Owner"
+                            : members[i]['email'],
+                      ),
+                    ),
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text("Close"),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -92,6 +205,8 @@ class _StatsPageState extends State<StatsPage>
     final bool isLandscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
     final double topPadding = isLandscape ? 20.0 : 140.0;
+
+    final currentId = _db.currentHouseholdId;
 
     return StreamBuilder<List<InventoryItem>>(
       stream: _inventoryStream,
@@ -113,6 +228,11 @@ class _StatsPageState extends State<StatsPage>
             int tQty = 0;
             Map<String, int> roomCounts = {};
 
+            Map<String, int> nameFrequency = {};
+            for (var item in currentItems.where((i) => i.type == 'Item')) {
+              nameFrequency[item.name] = (nameFrequency[item.name] ?? 0) + 1;
+            }
+
             for (var item in currentItems) {
               if (item.type == 'Room') {
                 if (!roomCounts.containsKey(item.name))
@@ -128,13 +248,27 @@ class _StatsPageState extends State<StatsPage>
             DateTime now = DateTime.now();
 
             for (var item in currentItems.where((i) => i.type == 'Item')) {
+              String displayName = item.name;
+              if ((nameFrequency[item.name] ?? 0) > 1) {
+                displayName =
+                    "${item.name} (${item.roomLocation ?? 'No Room'})";
+              }
+
               List<DateTime> usageDates = [];
               for (var log in logs) {
-                String name = log['item'] ?? "";
+                String logName = log['item'] ?? "";
+                String logRoom = log['room'] ?? "";
                 String action = log['action'] ?? "";
                 String timestampStr = log['timestamp'] ?? "";
 
-                if (name == item.name && (action.contains("USED"))) {
+                bool matchesItem = logName == item.name;
+                bool matchesRoom =
+                    logRoom == (item.roomLocation ?? "Unknown") ||
+                    logRoom == (item.roomLocation ?? "N/A");
+
+                bool isUsage = action.contains("USED");
+
+                if (matchesItem && matchesRoom && isUsage) {
                   DateTime? dt = _parseDate(timestampStr);
                   if (dt != null) usageDates.add(dt);
                 }
@@ -163,7 +297,7 @@ class _StatsPageState extends State<StatsPage>
 
               consumptionList.add(
                 ConsumptionData(
-                  itemName: item.name,
+                  itemName: displayName,
                   currentQuantity: item.quantity,
                   avgDaysPerUse: avgDays,
                   daysUntilRunout: daysLeft,
@@ -193,14 +327,39 @@ class _StatsPageState extends State<StatsPage>
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text(
-                          "My Inventory Stats",
-                          style: TextStyle(
-                            color: onSurface,
-                            fontSize: 28,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 1.2,
-                          ),
+                        // NO STREAM BUILDER HERE - USES STATE VARIABLES
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              "$_householdName Stats",
+                              style: TextStyle(
+                                color: onSurface,
+                                fontSize: 28,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                            if (_isShared) ...[
+                              const SizedBox(width: 10),
+                              GestureDetector(
+                                onTap: () => _showMembersDialog(currentId!),
+                                child: Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: theme.colorScheme.primary
+                                        .withOpacity(0.2),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                    Icons.group,
+                                    size: 20,
+                                    color: theme.colorScheme.primary,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                       ],
                     ),
@@ -531,7 +690,6 @@ class _StatsPageState extends State<StatsPage>
   }
 }
 
-// --- VISUAL GRAPH PAGE ---
 class ItemGraphPage extends StatelessWidget {
   final String itemName;
   final List<DateTime> usageHistory;

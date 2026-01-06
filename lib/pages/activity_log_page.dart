@@ -11,14 +11,13 @@ class ActivityLogPage extends StatefulWidget {
 class _ActivityLogPageState extends State<ActivityLogPage> {
   final FirestoreService _db = FirestoreService();
 
-  // --- ROBUST DATE PARSER (Fixes the "Only one date showing" bug) ---
+  // --- HELPER: Parse Timestamp ---
   DateTime? _parseTimestamp(String timestamp) {
     if (timestamp.trim().isEmpty) return null;
     try {
       return DateTime.parse(timestamp);
     } catch (_) {
       try {
-        // Fallback for space-separated format (2025-10-02 0:00:00)
         List<String> parts = timestamp.trim().split(' ');
         if (parts.length >= 2) {
           List<String> d = parts[0].split('-');
@@ -39,46 +38,28 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
     }
   }
 
+  // --- HELPER: Clean Name for Display ---
+  // If ID is "Soap_Bathroom", return "Soap".
+  String _getDisplayName(String id) {
+    if (id.contains('_')) {
+      return id.split('_').first;
+    }
+    return id;
+  }
+
   Color getActionColor(String action, ThemeData theme) {
-    if (action.contains("DELETED") || action.contains("REMOVE"))
+    if (action.contains("DELETED") ||
+        action.contains("REMOVE") ||
+        action.contains("MOVED")) {
       return Colors.redAccent;
+    }
     if (action == "USED ONE" || action == "USED") return Colors.orangeAccent;
-    if (action == "RESTOCKED" || action == "CREATED" || action == "UPDATED") {
+    if (action.contains("RESTOCKED") ||
+        action == "CREATED" ||
+        action == "UPDATED") {
       return theme.colorScheme.primary;
     }
     return theme.colorScheme.onSurface;
-  }
-
-  // --- REVERT LOGIC (Undoes inventory changes) ---
-  Future<void> _revertInventoryChange(Map<String, dynamic> log) async {
-    final String item = log['item'] ?? '';
-    final int change = (log['change'] as num?)?.toInt() ?? 0;
-
-    // Only revert if there was a valid item and a numerical change
-    if (item.isNotEmpty && change != 0) {
-      // 1. Fetch current inventory item
-      final docRef = _db.inventoryCollection.doc(item);
-      final docSnap = await docRef.get();
-
-      if (docSnap.exists) {
-        final data = docSnap.data() as Map<String, dynamic>;
-        final int currentQty = (data['quantity'] as num?)?.toInt() ?? 0;
-
-        // 2. Reverse the math
-        // If log says +5 (Restocked), we subtract 5.
-        // If log says -1 (Used), we add 1 (subtract -1).
-        int newQty = (currentQty - change).clamp(0, 9999);
-
-        // 3. Update DB
-        await _db.updateQuantity(item, newQty);
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Reverted inventory for $item.")),
-          );
-        }
-      }
-    }
   }
 
   void _showEditDialog(Map<String, dynamic> log) {
@@ -117,24 +98,17 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                         color: Theme.of(context).colorScheme.onSurface,
                       ),
                     ),
-                    style: OutlinedButton.styleFrom(
-                      side: BorderSide(color: Theme.of(context).dividerColor),
-                    ),
                     onPressed: () async {
                       final DateTime? d = await showDatePicker(
                         context: context,
                         initialDate: selectedDate,
                         firstDate: DateTime(2000),
                         lastDate: DateTime(2100),
-                        builder: (context, child) =>
-                            Theme(data: Theme.of(context), child: child!),
                       );
                       if (d != null) {
                         final TimeOfDay? t = await showTimePicker(
                           context: context,
                           initialTime: TimeOfDay.fromDateTime(selectedDate),
-                          builder: (context, child) =>
-                              Theme(data: Theme.of(context), child: child!),
                         );
                         if (t != null) {
                           setDialogState(() {
@@ -158,13 +132,9 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                     ),
                     decoration: InputDecoration(
                       labelText: "Note",
-                      labelStyle: TextStyle(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                      border: OutlineInputBorder(),
+                      border: const OutlineInputBorder(),
                       suffixIcon: IconButton(
                         icon: const Icon(Icons.access_time, size: 16),
-                        tooltip: "Add 'Date is approximate'",
                         onPressed: () {
                           String text = noteController.text;
                           if (text.isNotEmpty) text += " ";
@@ -177,7 +147,6 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                 ],
               ),
               actions: [
-                // DELETE BUTTON
                 TextButton(
                   child: const Text(
                     "Delete",
@@ -185,10 +154,9 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                   ),
                   onPressed: () {
                     Navigator.pop(ctx);
-                    _confirmDelete(log); // Pass full log for revert logic
+                    _confirmDelete(log);
                   },
                 ),
-                // SAVE BUTTON
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Theme.of(context).colorScheme.primary,
@@ -217,11 +185,11 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
       builder: (ctx) => AlertDialog(
         backgroundColor: Theme.of(context).cardColor,
         title: Text(
-          "Delete & Revert?",
+          "Delete Entry?",
           style: TextStyle(color: Theme.of(context).colorScheme.onSurface),
         ),
         content: Text(
-          "Deleting this entry will also UNDO any inventory changes (e.g., add back used items).",
+          "This will permanently remove this log entry.",
           style: TextStyle(
             color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
@@ -243,9 +211,6 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
             ),
             onPressed: () async {
               Navigator.pop(ctx);
-              // 1. Revert Inventory
-              await _revertInventoryChange(log);
-              // 2. Delete Log
               await _db.deleteLogEntry(log['id']);
             },
           ),
@@ -276,8 +241,9 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
       body: StreamBuilder<List<Map<String, dynamic>>>(
         stream: _db.getLogStream(),
         builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting)
+          if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
+          }
           final logs = snapshot.data ?? [];
 
           if (logs.isEmpty) {
@@ -300,7 +266,6 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
               final String item = log['item'] ?? 'Unknown Item';
               final String room = log['room'] ?? 'N/A';
               final String note = log['note'] ?? '';
-
               final int change = (log['change'] as num?)?.toInt() ?? 0;
               final int total = (log['total'] as num?)?.toInt() ?? 0;
 
@@ -340,7 +305,7 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              "$action: $item",
+                              "$action: ${_getDisplayName(item)}",
                               style: TextStyle(
                                 color: getActionColor(action, theme),
                                 fontWeight: FontWeight.bold,

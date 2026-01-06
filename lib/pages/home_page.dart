@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/inventory_item.dart';
 import '../services/firestore_service.dart';
+import '../services/notification_service.dart';
 
 // --- BACKGROUND FUNCTIONS ---
 
@@ -41,6 +42,12 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
   final int runoutThreshold = input['threshold'];
   final Set<String> ignored = Set<String>.from(input['ignored']);
 
+  // SEPARATE SETTINGS
+  final bool runoutEnabled = input['runoutEnabled'];
+  final bool usageEnabled = input['usageEnabled'];
+  final Set<String> runoutMuted = Set<String>.from(input['runoutMuted']);
+  final Set<String> usageMuted = Set<String>.from(input['usageMuted']);
+
   List<InventoryItem> items = rawItems
       .map((e) => InventoryItem.fromJson(e))
       .toList();
@@ -51,15 +58,20 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
 
   for (var item in items.where((i) => i.type == 'Item')) {
     if (ignored.contains(item.name)) continue;
+
     List<DateTime> usageDates = [];
 
     for (var log in rawLogs) {
-      String name = log['item'] ?? "";
-      String action = log['action'] ?? "";
-      String timestampStr = log['timestamp'] ?? "";
+      // Strict Match: Name + Room
+      String logName = log['item'] ?? "";
+      String logRoom = log['room'] ?? "";
+      bool matchName = logName == item.name;
+      bool matchRoom =
+          logRoom == (item.roomLocation ?? "Unknown") ||
+          logRoom == (item.roomLocation ?? "N/A");
 
-      if (name == item.name && (action == "USED ONE" || action == "USED")) {
-        DateTime? dt = _parseDateStatic(timestampStr);
+      if (matchName && matchRoom && (log['action'].contains("USED"))) {
+        DateTime? dt = _parseDateStatic(log['timestamp'] ?? "");
         if (dt != null) usageDates.add(dt);
       }
     }
@@ -67,31 +79,36 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
     if (usageDates.length >= 2) {
       usageDates.sort();
       DateTime lastUse = usageDates.last;
-
       int totalSpan = lastUse.difference(usageDates.first).inDays;
       if (totalSpan == 0) totalSpan = 1;
-
       int intervals = usageDates.length - 1;
       if (intervals < 1) intervals = 1;
-
       double avgRate = totalSpan / intervals;
       double stockDuration = (item.quantity + 1) * avgRate;
-
       int daysSinceLast = now.difference(lastUse).inDays;
       int daysLeft = (stockDuration - daysSinceLast).round();
 
-      if (daysLeft < runoutThreshold) {
+      // --- CHECK RUNOUT ---
+      // Only show if feature enabled AND room not muted
+      bool showRestock =
+          runoutEnabled &&
+          (item.roomLocation == null ||
+              !runoutMuted.contains(item.roomLocation));
+      if (showRestock && daysLeft < runoutThreshold) {
         tempRestock.add({'item': item, 'daysLeft': daysLeft});
       }
 
-      double bufferMultiplier = 1.5;
-      if (daysSinceLast > (avgRate * bufferMultiplier)) {
-        if (item.quantity > 0) {
-          tempUsage.add({
-            'item': item,
-            'expectedDate': lastUse.add(Duration(days: avgRate.round())),
-          });
-        }
+      // --- CHECK USAGE ---
+      // Only show if feature enabled AND room not muted
+      bool showUsage =
+          usageEnabled &&
+          (item.roomLocation == null ||
+              !usageMuted.contains(item.roomLocation));
+      if (showUsage && daysSinceLast > (avgRate * 1.5) && item.quantity > 0) {
+        tempUsage.add({
+          'item': item,
+          'expectedDate': lastUse.add(Duration(days: avgRate.round())),
+        });
       }
     }
   }
@@ -103,7 +120,19 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
 }
 
 class HomeTab extends StatefulWidget {
-  const HomeTab({super.key});
+  final bool runoutEnabled;
+  final bool usageEnabled;
+  final Set<String> runoutMutedRooms;
+  final Set<String> usageMutedRooms;
+
+  const HomeTab({
+    super.key,
+    required this.runoutEnabled,
+    required this.usageEnabled,
+    required this.runoutMutedRooms,
+    required this.usageMutedRooms,
+  });
+
   @override
   State<HomeTab> createState() => _HomeTabState();
 }
@@ -115,6 +144,10 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
   List<Map<String, dynamic>> _restockAlerts = [];
   List<Map<String, dynamic>> _usageAlerts = [];
   final Set<String> _ignoredUsageAlerts = {};
+
+  // Invite Stream
+  late Stream<List<Map<String, dynamic>>> _inviteStream;
+  List<Map<String, dynamic>> _currentInvites = [];
 
   final FirestoreService _db = FirestoreService();
 
@@ -128,6 +161,27 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
       if (mounted) setState(() => _currentTime = DateTime.now());
     });
     _runSmartLogic();
+
+    // Setup Invite Listener
+    _inviteStream = _db.getInvitationsStream();
+    _inviteStream.listen((invites) async {
+      if (invites.length > _currentInvites.length) {
+        final prefs = await SharedPreferences.getInstance();
+        if (prefs.getBool('axis_notif_invites') ?? true) {
+          final newInvite = invites.first;
+          NotificationService().scheduleSmartAlert(
+            id: 888,
+            title: "New Inventory Invite",
+            body:
+                "${newInvite['inviterName']} invited you to ${newInvite['householdName']}",
+            date: DateTime.now(),
+            time: TimeOfDay.now(),
+            payload: 'invite',
+          );
+        }
+      }
+      if (mounted) setState(() => _currentInvites = invites);
+    });
   }
 
   @override
@@ -142,6 +196,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
       List<String>? savedThresholds = prefs.getStringList(
         'axis_runout_thresholds',
       );
+
       int runoutThreshold = 7;
       if (savedThresholds != null && savedThresholds.isNotEmpty) {
         runoutThreshold = savedThresholds
@@ -169,6 +224,12 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
         'logs': rawLogs,
         'threshold': runoutThreshold,
         'ignored': _ignoredUsageAlerts.toList(),
+
+        // PASS SEPARATE CONFIGS
+        'runoutEnabled': widget.runoutEnabled,
+        'usageEnabled': widget.usageEnabled,
+        'runoutMuted': widget.runoutMutedRooms.toList(),
+        'usageMuted': widget.usageMutedRooms.toList(),
       });
 
       if (mounted) {
@@ -179,24 +240,33 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
         });
       }
     } catch (e) {
-      debugPrint("Error loading home logic: $e");
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  Future<void> _processUsageLog(InventoryItem item) async {
-    // FIX: Removed unused local variables.
-    // We pass an empty callback (d, a) {} because we aren't using the date yet.
+  // --- ACTIONS ---
 
+  void _dismissUsageAlert(InventoryItem item, bool confirmed) {
+    if (!confirmed) {
+      setState(() {
+        _ignoredUsageAlerts.add(item.name);
+        _usageAlerts.removeWhere(
+          (element) => (element['item'] as InventoryItem).name == item.name,
+        );
+      });
+    } else {
+      _processUsageLog(item);
+    }
+  }
+
+  Future<void> _processUsageLog(InventoryItem item) async {
     bool? confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => _buildDateDialog(
         ctx,
         item.name,
         "When did you use 1 '${item.name}'?",
-        (d, a) {
-          // Placeholder: Backend does not accept custom dates yet
-        },
+        (d, a) {},
       ),
     );
 
@@ -204,7 +274,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
     setState(() => _isLoading = true);
 
     int newQty = (item.quantity - 1).clamp(0, 9999);
-    await _db.updateQuantity(item.name, newQty);
+    await _db.updateQuantity(item.name, item.roomLocation, newQty);
     await _db.logActivity(
       "USED ONE",
       item.name,
@@ -224,9 +294,6 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
 
   Future<void> _processRestock(InventoryItem item) async {
     int quantityToAdd = 1;
-    DateTime chosenDate = DateTime.now();
-    bool chosenApprox = false;
-
     bool? confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
@@ -251,65 +318,39 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     IconButton(
-                      onPressed: () {
-                        if (quantityToAdd > 1)
-                          setDialogState(() => quantityToAdd--);
-                      },
+                      onPressed: () => quantityToAdd > 1
+                          ? setDialogState(() => quantityToAdd--)
+                          : null,
                       icon: Icon(
                         Icons.remove_circle_outline,
                         color: Theme.of(context).colorScheme.onSurface,
-                        size: 32,
                       ),
                     ),
-                    const SizedBox(width: 20),
                     Text(
-                      "$quantityToAdd",
+                      " $quantityToAdd ",
                       style: TextStyle(
                         color: Theme.of(context).colorScheme.primary,
                         fontSize: 32,
                         fontWeight: FontWeight.bold,
                       ),
                     ),
-                    const SizedBox(width: 20),
                     IconButton(
                       onPressed: () => setDialogState(() => quantityToAdd++),
                       icon: Icon(
                         Icons.add_circle_outline,
                         color: Theme.of(context).colorScheme.onSurface,
-                        size: 32,
                       ),
                     ),
                   ],
-                ),
-                const SizedBox(height: 20),
-                _buildDatePickerButton(
-                  context,
-                  chosenDate,
-                  (d) => setDialogState(() => chosenDate = d),
-                ),
-                const SizedBox(height: 10),
-                _buildApproximateCheckbox(
-                  context,
-                  chosenApprox,
-                  (v) => setDialogState(() => chosenApprox = v),
                 ),
               ],
             ),
             actions: [
               TextButton(
-                child: Text(
-                  "Cancel",
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
+                child: const Text("Cancel"),
                 onPressed: () => Navigator.pop(ctx, false),
               ),
               ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.primary,
-                  foregroundColor: Colors.black,
-                ),
                 child: const Text("Restock"),
                 onPressed: () => Navigator.pop(ctx, true),
               ),
@@ -322,11 +363,8 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
     if (confirm != true) return;
     setState(() => _isLoading = true);
 
-    // FIX: "Use" the variables to clear the yellow warning until backend is updated
-    debugPrint("Restock Date: $chosenDate, Approx: $chosenApprox");
-
     int newQty = item.quantity + quantityToAdd;
-    await _db.updateQuantity(item.name, newQty);
+    await _db.updateQuantity(item.name, item.roomLocation, newQty);
     await _db.logActivity(
       "RESTOCKED",
       item.name,
@@ -343,18 +381,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
     }
   }
 
-  void _dismissUsageAlert(InventoryItem item, bool confirmed) {
-    if (!confirmed) {
-      setState(() {
-        _ignoredUsageAlerts.add(item.name);
-        _usageAlerts.removeWhere(
-          (element) => (element['item'] as InventoryItem).name == item.name,
-        );
-      });
-    } else {
-      _processUsageLog(item);
-    }
-  }
+  // --- WIDGET BUILDERS ---
 
   Widget _buildDatePickerButton(
     BuildContext context,
@@ -366,35 +393,16 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
         Icons.calendar_today,
         color: Theme.of(context).colorScheme.primary,
       ),
-      label: Text(
-        DateFormat('MMMM d, yyyy').format(current),
-        style: TextStyle(color: Theme.of(context).colorScheme.onSurface),
-      ),
-      style: OutlinedButton.styleFrom(
-        side: BorderSide(color: Theme.of(context).dividerColor),
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-      ),
+      label: Text(DateFormat('MMMM d, yyyy').format(current)),
       onPressed: () async {
-        final DateTime? picked = await showDatePicker(
+        final picked = await showDatePicker(
           context: context,
           initialDate: current,
           firstDate: DateTime(2020),
           lastDate: DateTime.now(),
-          builder: (context, child) =>
-              Theme(data: Theme.of(context), child: child!),
         );
-        if (picked != null) {
-          final now = DateTime.now();
-          onPick(
-            DateTime(
-              picked.year,
-              picked.month,
-              picked.day,
-              now.hour,
-              now.minute,
-            ),
-          );
-        }
+        if (picked != null)
+          onPick(DateTime(picked.year, picked.month, picked.day));
       },
     );
   }
@@ -410,10 +418,6 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
         Checkbox(
           value: value,
           activeColor: Theme.of(context).colorScheme.primary,
-          checkColor: Colors.black,
-          side: BorderSide(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
           onChanged: (val) => onChanged(val ?? false),
         ),
         Text(
@@ -467,19 +471,10 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
           ),
           actions: [
             TextButton(
-              child: Text(
-                "Cancel",
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
+              child: const Text("Cancel"),
               onPressed: () => Navigator.pop(context, false),
             ),
             ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Theme.of(context).colorScheme.primary,
-                foregroundColor: Colors.black,
-              ),
               child: const Text("Confirm"),
               onPressed: () {
                 onConfirmData(tempDate, tempApprox);
@@ -495,15 +490,21 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
   @override
   Widget build(BuildContext context) {
     super.build(context);
-
     final theme = Theme.of(context);
     final isLandscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
     final topPadding = isLandscape ? 20.0 : 140.0;
 
-    List<Widget> dynamicTiles = [];
+    List<Widget> tiles = [];
+
+    // 1. INVITE TILES (High Priority)
+    for (var invite in _currentInvites) {
+      tiles.add(_buildInviteTile(theme, invite));
+    }
+
+    // 2. ALERT TILES
     for (var alert in _restockAlerts) {
-      dynamicTiles.add(
+      tiles.add(
         _buildRestockAlert(
           theme,
           alert['item'] as InventoryItem,
@@ -512,7 +513,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
       );
     }
     for (var alert in _usageAlerts) {
-      dynamicTiles.add(
+      tiles.add(
         _buildUsageCheckAlert(
           theme,
           alert['item'] as InventoryItem,
@@ -520,8 +521,9 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
         ),
       );
     }
-    if (dynamicTiles.isEmpty && !_isLoading) {
-      dynamicTiles.add(_buildAllClearTile(theme));
+
+    if (tiles.isEmpty && !_isLoading) {
+      tiles.add(_buildAllClearTile(theme));
     }
 
     return Padding(
@@ -538,40 +540,38 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
               ),
             )
           : SingleChildScrollView(
-              padding: EdgeInsets.zero,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   _buildHeroTile(theme),
                   const SizedBox(height: 20),
-                  if (dynamicTiles.length > 1 ||
-                      (dynamicTiles.isNotEmpty &&
-                          dynamicTiles[0].key != const Key('all_clear')))
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 15, left: 5),
-                      child: Text(
-                        "INSIGHTS",
-                        style: TextStyle(
-                          color: theme.colorScheme.onSurfaceVariant,
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 2.0,
-                        ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 15, left: 5),
+                    child: Text(
+                      "INSIGHTS",
+                      style: TextStyle(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 2.0,
                       ),
                     ),
+                  ),
                   LayoutBuilder(
                     builder: (context, constraints) {
-                      int columns = constraints.maxWidth > 600 ? 2 : 1;
-                      if (columns == 1) return Column(children: dynamicTiles);
+                      int cols = constraints.maxWidth > 600 ? 2 : 1;
+                      if (cols == 1) return Column(children: tiles);
                       double spacing = 15.0;
-                      double cardWidth =
-                          (constraints.maxWidth - (spacing * (columns - 1))) /
-                          columns;
+                      double w =
+                          (constraints.maxWidth - (spacing * (cols - 1))) /
+                          cols;
                       return Wrap(
                         spacing: spacing,
                         runSpacing: spacing,
-                        children: dynamicTiles
-                            .map((w) => SizedBox(width: cardWidth, child: w))
+                        children: tiles
+                            .map(
+                              (w_child) => SizedBox(width: w, child: w_child),
+                            )
                             .toList(),
                       );
                     },
@@ -579,6 +579,96 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
                 ],
               ),
             ),
+    );
+  }
+
+  // --- TILE DESIGNS ---
+
+  Widget _buildInviteTile(ThemeData theme, Map<String, dynamic> invite) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 15),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primary.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: theme.colorScheme.primary.withOpacity(0.5)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary.withOpacity(0.2),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.mark_email_unread,
+                  color: theme.colorScheme.primary,
+                  size: 28,
+                ),
+              ),
+              const SizedBox(width: 15),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "YOU'RE INVITED",
+                      style: TextStyle(
+                        color: theme.colorScheme.primary,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      "${invite['inviterName']} invited you to join:",
+                      style: TextStyle(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontSize: 12,
+                      ),
+                    ),
+                    Text(
+                      invite['householdName'],
+                      style: TextStyle(
+                        color: theme.colorScheme.onSurface,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 15),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => _db.declineInvitation(invite['id']),
+                  child: const Text("Decline"),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () =>
+                      _db.acceptInvitation(invite['id'], invite['householdId']),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: theme.colorScheme.primary,
+                    foregroundColor: Colors.black,
+                  ),
+                  child: const Text("Accept"),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -655,10 +745,14 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
   Widget _buildRestockAlert(ThemeData theme, InventoryItem item, int daysLeft) {
     Color color = Colors.redAccent;
     List<TextSpan> textSpans;
+
+    // UPDATED TEXT: Include Room Name
+    String displayText = "${item.name} (${item.roomLocation ?? 'Unknown'})";
+
     if (daysLeft <= 0) {
       textSpans = [
         TextSpan(
-          text: item.name,
+          text: displayText,
           style: const TextStyle(fontWeight: FontWeight.bold),
         ),
         const TextSpan(text: " is "),
@@ -672,7 +766,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
     } else {
       textSpans = [
         TextSpan(
-          text: item.name,
+          text: displayText,
           style: const TextStyle(fontWeight: FontWeight.bold),
         ),
         const TextSpan(text: " runs out in "),
@@ -798,8 +892,9 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
                       ),
                     ),
                     const SizedBox(height: 4),
+                    // UPDATED TEXT: Include Room Name
                     Text(
-                      "Did you use ${item.name}?",
+                      "Did you use ${item.name} in ${item.roomLocation ?? 'Unknown'}?",
                       style: TextStyle(
                         color: theme.colorScheme.onSurface,
                         fontSize: 18,
@@ -820,75 +915,26 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
             ],
           ),
           const SizedBox(height: 15),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              if (constraints.maxWidth < 280) {
-                return Column(
-                  children: [
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton(
-                        onPressed: () => _dismissUsageAlert(item, false),
-                        style: OutlinedButton.styleFrom(
-                          side: BorderSide(color: theme.dividerColor),
-                          foregroundColor: theme.colorScheme.onSurfaceVariant,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: const Text("No / Ignore"),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: () => _dismissUsageAlert(item, true),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: color,
-                          foregroundColor: Colors.black,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: const Text("Yes, I did"),
-                      ),
-                    ),
-                  ],
-                );
-              }
-              return Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => _dismissUsageAlert(item, false),
-                      style: OutlinedButton.styleFrom(
-                        side: BorderSide(color: theme.dividerColor),
-                        foregroundColor: theme.colorScheme.onSurfaceVariant,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      child: const Text("No / Ignore"),
-                    ),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => _dismissUsageAlert(item, false),
+                  child: const Text("No / Ignore"),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: color,
+                    foregroundColor: Colors.black,
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () => _dismissUsageAlert(item, true),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: color,
-                        foregroundColor: Colors.black,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      child: const Text("Yes, I did"),
-                    ),
-                  ),
-                ],
-              );
-            },
+                  onPressed: () => _dismissUsageAlert(item, true),
+                  child: const Text("Yes, I did"),
+                ),
+              ),
+            ],
           ),
         ],
       ),

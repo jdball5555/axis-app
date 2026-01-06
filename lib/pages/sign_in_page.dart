@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class SignInPage extends StatefulWidget {
   const SignInPage({super.key});
@@ -9,65 +10,67 @@ class SignInPage extends StatefulWidget {
 }
 
 class _SignInPageState extends State<SignInPage> {
-  final _emailController = TextEditingController();
-  final _passController = TextEditingController();
-  bool _isLogin = true;
-  bool _isLoading = false;
-  String? _errorMessage;
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
 
-  Future<void> _authenticate() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _nameController = TextEditingController(); // NEW
+
+  bool _isLoading = false;
+  bool _isLogin = true; // Toggle between Login and Sign Up
+
+  Future<void> _submit() async {
+    setState(() => _isLoading = true);
     try {
       if (_isLogin) {
-        await FirebaseAuth.instance.signInWithEmailAndPassword(
+        // --- LOG IN ---
+        await _auth.signInWithEmailAndPassword(
           email: _emailController.text.trim(),
-          password: _passController.text.trim(),
+          password: _passwordController.text.trim(),
         );
       } else {
-        await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        // --- SIGN UP ---
+        if (_nameController.text.trim().isEmpty) {
+          throw Exception("Please enter a display name.");
+        }
+
+        // 1. Create Auth User
+        UserCredential cred = await _auth.createUserWithEmailAndPassword(
           email: _emailController.text.trim(),
-          password: _passController.text.trim(),
+          password: _passwordController.text.trim(),
         );
+
+        // 2. Update Auth Profile
+        if (cred.user != null) {
+          await cred.user!.updateDisplayName(_nameController.text.trim());
+
+          // 3. Create User Document in Firestore
+          // This ensures the profile exists immediately for invites/sharing
+          await _db.collection('users').doc(cred.user!.uid).set({
+            'email': _emailController.text.trim(),
+            'displayName': _nameController.text.trim(),
+            'createdAt': FieldValue.serverTimestamp(),
+            'joinedHouseholds': [],
+            'currentHouseholdId':
+                null, // Will be set by FirestoreService.init()
+          });
+        }
       }
     } on FirebaseAuthException catch (e) {
-      setState(() => _errorMessage = e.message);
-    } catch (e) {
-      setState(() => _errorMessage = "An unexpected error occurred.");
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
-  }
-
-  Future<void> _resetPassword() async {
-    final email = _emailController.text.trim();
-    if (email.isEmpty) {
-      setState(
-        () => _errorMessage = "Please enter your email to reset password.",
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message ?? "Authentication failed"),
+          backgroundColor: Colors.red,
+        ),
       );
-      return;
-    }
-
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
-    try {
-      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("Password reset email sent! Check your inbox."),
-          ),
-        );
-      }
-    } on FirebaseAuthException catch (e) {
-      setState(() => _errorMessage = e.message);
     } catch (e) {
-      setState(() => _errorMessage = "Error sending reset email.");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString().replaceAll("Exception: ", "")),
+          backgroundColor: Colors.red,
+        ),
+      );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -75,169 +78,136 @@ class _SignInPageState extends State<SignInPage> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final primary = theme.colorScheme.primary;
+    // Determine colors based on system theme since we are outside the main app shell
+    final isDark = MediaQuery.of(context).platformBrightness == Brightness.dark;
+    final bgColor = isDark ? const Color(0xFF121212) : const Color(0xFFF5F5F5);
+    final textColor = isDark ? Colors.white : Colors.black87;
+    const primaryColor = Color(0xFF00C897);
 
     return Scaffold(
-      backgroundColor: theme.scaffoldBackgroundColor,
+      backgroundColor: bgColor,
       body: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 400),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  width: 100,
-                  height: 100,
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: Colors.black,
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: primary.withOpacity(0.5),
-                      width: 2,
-                    ),
-                  ),
-                  child: ClipOval(
-                    child: Image.asset(
-                      'assets/icon.png',
-                      fit: BoxFit.cover,
-                      errorBuilder: (c, e, s) =>
-                          Icon(Icons.hub, size: 50, color: primary),
-                    ),
-                  ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // Logo / Icon
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: primaryColor.withOpacity(0.1),
+                  shape: BoxShape.circle,
                 ),
-                const SizedBox(height: 24),
-                Text(
-                  "Axis",
-                  style: TextStyle(
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                    color: theme.colorScheme.onSurface,
-                    letterSpacing: 1.5,
-                  ),
+                child: const Icon(Icons.hub, size: 60, color: primaryColor),
+              ),
+              const SizedBox(height: 30),
+
+              Text(
+                _isLogin ? "Welcome Back" : "Create Account",
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  color: textColor,
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  _isLogin ? "Welcome Back" : "Create Account",
-                  style: TextStyle(
-                    fontSize: 16,
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                _isLogin ? "Sign in to continue" : "Join to start tracking",
+                style: TextStyle(
+                  fontSize: 16,
+                  color: textColor.withOpacity(0.6),
                 ),
-                const SizedBox(height: 40),
+              ),
+              const SizedBox(height: 40),
+
+              // NAME FIELD (Sign Up Only)
+              if (!_isLogin) ...[
                 TextField(
-                  controller: _emailController,
-                  style: TextStyle(color: theme.colorScheme.onSurface),
+                  controller: _nameController,
+                  style: TextStyle(color: textColor),
                   decoration: InputDecoration(
-                    labelText: "Email",
-                    prefixIcon: Icon(Icons.email_outlined, color: primary),
+                    labelText: "Display Name",
+                    prefixIcon: const Icon(Icons.person_outline),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: theme.dividerColor),
                     ),
                   ),
                 ),
                 const SizedBox(height: 16),
-                TextField(
-                  controller: _passController,
-                  obscureText: true,
-                  style: TextStyle(color: theme.colorScheme.onSurface),
-                  decoration: InputDecoration(
-                    labelText: "Password",
-                    prefixIcon: Icon(Icons.lock_outline, color: primary),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: theme.dividerColor),
-                    ),
-                  ),
-                ),
-                if (_errorMessage != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 16),
-                    child: Text(
-                      _errorMessage!,
-                      style: const TextStyle(
-                        color: Colors.redAccent,
-                        fontSize: 13,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-
-                // Forgot Password Button (Only in Login Mode)
-                if (_isLogin)
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton(
-                      onPressed: _isLoading ? null : _resetPassword,
-                      child: Text(
-                        "Forgot Password?",
-                        style: TextStyle(
-                          color: theme.colorScheme.onSurfaceVariant,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                  )
-                else
-                  const SizedBox(height: 24),
-
-                if (_isLogin) const SizedBox(height: 10),
-
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: primary,
-                      foregroundColor: Colors.black,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    onPressed: _isLoading ? null : _authenticate,
-                    child: _isLoading
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.black,
-                            ),
-                          )
-                        : Text(
-                            _isLogin ? "Login" : "Sign Up",
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                TextButton(
-                  onPressed: () => setState(() {
-                    _isLogin = !_isLogin;
-                    _errorMessage = null;
-                  }),
-                  child: Text(
-                    _isLogin
-                        ? "Don't have an account? Sign Up"
-                        : "Already have an account? Login",
-                    style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
-                  ),
-                ),
               ],
-            ),
+
+              TextField(
+                controller: _emailController,
+                style: TextStyle(color: textColor),
+                decoration: InputDecoration(
+                  labelText: "Email",
+                  prefixIcon: const Icon(Icons.email_outlined),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                keyboardType: TextInputType.emailAddress,
+              ),
+              const SizedBox(height: 16),
+
+              TextField(
+                controller: _passwordController,
+                style: TextStyle(color: textColor),
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: "Password",
+                  prefixIcon: const Icon(Icons.lock_outline),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: primaryColor,
+                    foregroundColor: Colors.black,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 0,
+                  ),
+                  onPressed: _isLoading ? null : _submit,
+                  child: _isLoading
+                      ? const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.black,
+                          ),
+                        )
+                      : Text(
+                          _isLogin ? "Sign In" : "Sign Up",
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              TextButton(
+                onPressed: () => setState(() => _isLogin = !_isLogin),
+                child: Text(
+                  _isLogin
+                      ? "New here? Create Account"
+                      : "Have an account? Sign In",
+                  style: TextStyle(color: textColor.withOpacity(0.7)),
+                ),
+              ),
+            ],
           ),
         ),
       ),
