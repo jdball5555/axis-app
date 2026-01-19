@@ -1,14 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../../models/tab_data.dart';
 
 import 'sections/account_settings.dart';
 import 'sections/appearance_settings.dart';
-import 'sections/tabs_settings.dart';
+import 'sections/nav_bar_settings.dart';
+import 'sections/home_page_settings.dart';
 import 'sections/notifications_settings.dart';
 import 'sections/data_settings.dart';
 import 'sections/info_settings.dart';
 
-class SettingsSheet extends StatefulWidget {
+class SettingsPage extends StatefulWidget {
   final bool isLightMode;
   final Function(bool) onThemeChanged;
   final Color currentPrimaryColor;
@@ -16,35 +21,20 @@ class SettingsSheet extends StatefulWidget {
 
   final List<TabData> currentTabs;
   final List<TabData> allPossibleTabs;
-  final List<int> runoutThresholds;
-  final bool runoutEnabled;
-  final bool debriefEnabled;
-  final TimeOfDay debriefTime;
-  final bool runoutNotificationsEnabled;
-  final bool usageNotificationsEnabled;
-  final TimeOfDay smartAlertTime;
-  final TimeOfDay usageAlertTime;
   final String appVersion;
 
   final List<String> knownRooms;
-  final Set<String> runoutMutedRooms;
-  final Set<String> usageMutedRooms;
-  final Function(Set<String>) onRunoutMutedChanged;
-  final Function(Set<String>) onUsageMutedChanged;
 
   final VoidCallback onViewAbout;
   final Function(String, bool) onTabToggled;
   final Function(List<TabData>) onTabsReordered;
-  final Function(List<int>, bool) onRunoutSettingsChanged;
-  final Function(bool, TimeOfDay) onDebriefChanged;
-  final Function(bool, bool, TimeOfDay, TimeOfDay) onSmartAlertsChanged;
 
   final VoidCallback onImportInventory;
   final VoidCallback onImportActivity;
   final VoidCallback onResetData;
   final VoidCallback onViewCSVFormats;
 
-  const SettingsSheet({
+  const SettingsPage({
     super.key,
     required this.isLightMode,
     required this.onThemeChanged,
@@ -52,225 +42,390 @@ class SettingsSheet extends StatefulWidget {
     required this.onColorChanged,
     required this.currentTabs,
     required this.allPossibleTabs,
-    required this.runoutThresholds,
-    required this.runoutEnabled,
-    required this.debriefEnabled,
-    required this.debriefTime,
-    required this.runoutNotificationsEnabled,
-    required this.usageNotificationsEnabled,
-    required this.smartAlertTime,
-    required this.usageAlertTime,
     required this.appVersion,
     required this.onViewAbout,
     required this.onTabToggled,
     required this.onTabsReordered,
-    required this.onRunoutSettingsChanged,
-    required this.onDebriefChanged,
-    required this.onSmartAlertsChanged,
     required this.onImportInventory,
     required this.onImportActivity,
     required this.onResetData,
     required this.onViewCSVFormats,
     required this.knownRooms,
-    required this.runoutMutedRooms,
-    required this.usageMutedRooms,
-    required this.onRunoutMutedChanged,
-    required this.onUsageMutedChanged,
   });
 
   @override
-  State<SettingsSheet> createState() => _SettingsSheetState();
+  State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsSheetState extends State<SettingsSheet> {
+class _SettingsPageState extends State<SettingsPage> {
   late Set<String> _activeTabIds;
   late List<TabData> _orderedTabs;
-  late bool _debriefEnabled;
-  late TimeOfDay _debriefTime;
-  late List<int> _thresholds;
-  late bool _runoutVisualsEnabled;
-  late bool _runoutNotifsEnabled;
-  late bool _usageNotifsEnabled;
-  late TimeOfDay _runoutTime;
-  late TimeOfDay _usageTime;
 
-  // Local state for instant updates
-  late Set<String> _runoutMutedRooms;
-  late Set<String> _usageMutedRooms;
+  // Inventory State (Fetched Async)
+  bool _isLoadingInventories = true;
+  List<InventoryConfig> _loadedInventories = [];
+  Map<String, Set<String>> _runoutMutedMap = {};
+  Map<String, Set<String>> _usageMutedMap = {};
 
   @override
   void initState() {
     super.initState();
-    _initValues();
-  }
-
-  void _initValues() {
     _activeTabIds = widget.currentTabs.map((t) => t.id).toSet();
     _orderedTabs = List.from(widget.allPossibleTabs);
-    _debriefEnabled = widget.debriefEnabled;
-    _debriefTime = widget.debriefTime;
-    _thresholds = List.from(widget.runoutThresholds)
-      ..sort((a, b) => b.compareTo(a));
-    _runoutVisualsEnabled = widget.runoutEnabled;
-    _runoutNotifsEnabled = widget.runoutNotificationsEnabled;
-    _usageNotifsEnabled = widget.usageNotificationsEnabled;
-    _runoutTime = widget.smartAlertTime;
-    _usageTime = widget.usageAlertTime;
-    _runoutMutedRooms = Set.from(widget.runoutMutedRooms);
-    _usageMutedRooms = Set.from(widget.usageMutedRooms);
+    _loadAllInventoriesData();
   }
 
-  @override
-  void didUpdateWidget(SettingsSheet oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.runoutNotificationsEnabled !=
-            oldWidget.runoutNotificationsEnabled ||
-        widget.usageNotificationsEnabled !=
-            oldWidget.usageNotificationsEnabled ||
-        widget.runoutMutedRooms != oldWidget.runoutMutedRooms) {
-      _initValues();
+  Future<void> _loadAllInventoriesData() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      final snapshot = await FirebaseFirestore.instance
+          .collection('households')
+          .where('members', arrayContains: user.uid)
+          .get();
+
+      List<InventoryConfig> tempInvs = [];
+      Map<String, Set<String>> tempRunout = {};
+      Map<String, Set<String>> tempUsage = {};
+
+      for (var doc in snapshot.docs) {
+        String id = doc.id;
+        String name = doc.data()['name'] ?? "Untitled";
+
+        List<String> rooms = await _fetchInventoryRooms(id);
+
+        tempInvs.add(InventoryConfig(id: id, name: name, rooms: rooms));
+
+        tempRunout[id] =
+            (prefs.getStringList('axis_muted_runout_rooms_$id') ?? []).toSet();
+        tempUsage[id] =
+            (prefs.getStringList('axis_muted_usage_rooms_$id') ?? []).toSet();
+      }
+
+      List<String>? savedOrder = prefs.getStringList(
+        'axis_home_inventory_order',
+      );
+      if (savedOrder != null) {
+        tempInvs.sort((a, b) {
+          int indexA = savedOrder.indexOf(a.id);
+          int indexB = savedOrder.indexOf(b.id);
+          if (indexA == -1) indexA = 999;
+          if (indexB == -1) indexB = 999;
+          return indexA.compareTo(indexB);
+        });
+      }
+
+      if (mounted) {
+        setState(() {
+          _loadedInventories = tempInvs;
+          _runoutMutedMap = tempRunout;
+          _usageMutedMap = tempUsage;
+          _isLoadingInventories = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _isLoadingInventories = false);
     }
   }
 
-  void _onReorder(int oldIndex, int newIndex) {
-    setState(() {
-      if (newIndex > oldIndex) newIndex -= 1;
-      final item = _orderedTabs.removeAt(oldIndex);
-      _orderedTabs.insert(newIndex, item);
-    });
-    widget.onTabsReordered(_orderedTabs);
+  Future<List<String>> _fetchInventoryRooms(String inventoryId) async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('households')
+          .doc(inventoryId)
+          .collection('inventory')
+          .get();
+      Set<String> rooms = {};
+      for (var doc in snapshot.docs) {
+        final data = doc.data();
+        if (data['type'] == 'Room') {
+          rooms.add(data['name']);
+        } else if (data['roomLocation'] != null &&
+            data['roomLocation'].toString().isNotEmpty) {
+          rooms.add(data['roomLocation']);
+        }
+      }
+      return rooms.toList()..sort();
+    } catch (e) {
+      return [];
+    }
   }
 
-  void _toggleTabLocally(String id, bool active) {
+  // --- HANDLERS ---
+
+  Future<void> _onReorderInventories(int oldIndex, int newIndex) async {
     setState(() {
-      if (active)
-        _activeTabIds.add(id);
-      else if (_activeTabIds.length > 1)
-        _activeTabIds.remove(id);
-      else
-        active = true;
+      final item = _loadedInventories.removeAt(oldIndex);
+      _loadedInventories.insert(newIndex, item);
     });
-    widget.onTabToggled(id, active);
+    final prefs = await SharedPreferences.getInstance();
+    List<String> idList = _loadedInventories.map((e) => e.id).toList();
+    await prefs.setStringList('axis_home_inventory_order', idList);
+  }
+
+  Future<void> _onToggleMute(
+    String type,
+    String invId,
+    String room,
+    bool isMuted,
+  ) async {
+    setState(() {
+      Map<String, Set<String>> targetMap = (type == 'runout')
+          ? _runoutMutedMap
+          : _usageMutedMap;
+      if (targetMap[invId] == null) targetMap[invId] = {};
+
+      if (isMuted)
+        targetMap[invId]!.add(room);
+      else
+        targetMap[invId]!.remove(room);
+    });
+
+    final prefs = await SharedPreferences.getInstance();
+    String key = (type == 'runout')
+        ? 'axis_muted_runout_rooms_$invId'
+        : 'axis_muted_usage_rooms_$invId';
+
+    Map<String, Set<String>> targetMap = (type == 'runout')
+        ? _runoutMutedMap
+        : _usageMutedMap;
+    await prefs.setStringList(key, targetMap[invId]!.toList());
+  }
+
+  void _pushSubPage(String title, Widget content) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => Scaffold(
+          appBar: AppBar(
+            title: Text(
+              title,
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            elevation: 0,
+            scrolledUnderElevation: 0,
+          ),
+          body: SingleChildScrollView(
+            child: Padding(padding: const EdgeInsets.all(20.0), child: content),
+          ),
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return Container(
-      height: MediaQuery.of(context).size.height * 0.9,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: theme.scaffoldBackgroundColor,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          "Settings",
+          style: TextStyle(fontWeight: FontWeight.w900, fontSize: 28),
+        ),
+        centerTitle: true,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      body: ListView(
+        padding: const EdgeInsets.all(20),
         children: [
-          Center(
-            child: Container(
-              width: 50,
-              height: 5,
-              decoration: BoxDecoration(
-                color: theme.dividerColor,
-                borderRadius: BorderRadius.circular(10),
+          _SettingsTile(
+            icon: Icons.person_outline,
+            title: "Account",
+            subtitle: "Inventories",
+            onTap: () => _pushSubPage("Account", const AccountSettings()),
+          ),
+          const SizedBox(height: 15),
+
+          _SettingsTile(
+            icon: Icons.palette_outlined,
+            title: "Appearance",
+            subtitle: "Theme, Colors",
+            onTap: () => _pushSubPage(
+              "Appearance",
+              AppearanceSettings(
+                isLightMode: widget.isLightMode,
+                onThemeChanged: widget.onThemeChanged,
+                currentPrimaryColor: widget.currentPrimaryColor,
+                onColorChanged: widget.onColorChanged,
               ),
             ),
           ),
-          const SizedBox(height: 20),
-          Text(
-            "Settings",
-            style: TextStyle(
-              color: theme.colorScheme.onSurface,
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
+          const SizedBox(height: 15),
+
+          _SettingsTile(
+            icon: Icons.view_sidebar_outlined,
+            title: "Navigation Bar",
+            subtitle: "Reorder & Toggle",
+            onTap: () => _pushSubPage(
+              "Navigation Bar",
+              NavBarSettings(
+                orderedTabs: _orderedTabs,
+                activeTabIds: _activeTabIds,
+                onReorder: (newOrder) {
+                  setState(() => _orderedTabs = newOrder);
+                  widget.onTabsReordered(newOrder);
+                },
+                onToggle: (id, active) {
+                  setState(() {
+                    if (active)
+                      _activeTabIds.add(id);
+                    else if (_activeTabIds.length > 1)
+                      _activeTabIds.remove(id);
+                  });
+                  widget.onTabToggled(id, active);
+                },
+              ),
             ),
           ),
-          const SizedBox(height: 20),
-          Expanded(
-            child: ListView(
-              physics: const ClampingScrollPhysics(),
-              children: [
-                const AccountSettings(),
-                const SizedBox(height: 30),
+          const SizedBox(height: 15),
 
-                AppearanceSettings(
-                  isLightMode: widget.isLightMode,
-                  onThemeChanged: widget.onThemeChanged,
-                  currentPrimaryColor: widget.currentPrimaryColor,
-                  onColorChanged: widget.onColorChanged,
-                ),
-                const SizedBox(height: 30),
+          _SettingsTile(
+            icon: Icons.home_outlined,
+            title: "Home Page",
+            subtitle: "Layout & Alerts",
+            onTap: () => _pushSubPage(
+              "Home Page",
+              _isLoadingInventories
+                  ? const Center(child: CircularProgressIndicator())
+                  : HomePageSettings(
+                      inventories: _loadedInventories,
+                      runoutMutedMap: _runoutMutedMap,
+                      usageMutedMap: _usageMutedMap,
+                      onReorderInventories: _onReorderInventories,
+                      onToggleRunoutMute: (id, room, val) =>
+                          _onToggleMute('runout', id, room, val),
+                      onToggleUsageMute: (id, room, val) =>
+                          _onToggleMute('usage', id, room, val),
+                    ),
+            ),
+          ),
+          const SizedBox(height: 15),
 
-                TabsSettings(
-                  orderedTabs: _orderedTabs,
-                  activeTabIds: _activeTabIds,
-                  onReorder: _onReorder,
-                  onToggle: _toggleTabLocally,
-                ),
-                const SizedBox(height: 30),
+          _SettingsTile(
+            icon: Icons.notifications_outlined,
+            title: "Notifications",
+            subtitle: "Alerts, Debriefs, Smart Triggers",
+            onTap: () => _pushSubPage(
+              "Notifications",
+              NotificationsSettings(knownRooms: widget.knownRooms),
+            ),
+          ),
+          const SizedBox(height: 15),
 
-                NotificationsSettings(
-                  debriefEnabled: _debriefEnabled,
-                  debriefTime: _debriefTime,
-                  onDebriefChanged: (enabled, time) {
-                    setState(() {
-                      _debriefEnabled = enabled;
-                      _debriefTime = time;
-                    });
-                    widget.onDebriefChanged(enabled, time);
-                  },
-                  runoutEnabled: _runoutVisualsEnabled,
-                  runoutNotifsEnabled: _runoutNotifsEnabled,
-                  runoutTime: _runoutTime,
-                  thresholds: _thresholds,
-                  onRunoutSettingsChanged: (newList, enabled) {
-                    setState(() {
-                      _thresholds = newList;
-                      _runoutVisualsEnabled = enabled;
-                    });
-                    widget.onRunoutSettingsChanged(newList, enabled);
-                  },
-                  usageNotifsEnabled: _usageNotifsEnabled,
-                  usageTime: _usageTime,
-                  onSmartAlertsChanged: (runout, usage, rTime, uTime) {
-                    setState(() {
-                      _runoutNotifsEnabled = runout;
-                      _usageNotifsEnabled = usage;
-                      _runoutTime = rTime;
-                      _usageTime = uTime;
-                    });
-                    widget.onSmartAlertsChanged(runout, usage, rTime, uTime);
-                  },
+          _SettingsTile(
+            icon: Icons.cloud_download_outlined,
+            title: "Data",
+            subtitle: "Import, Export, Reset",
+            onTap: () => _pushSubPage(
+              "Data",
+              DataSettings(
+                onImportInventory: widget.onImportInventory,
+                onImportActivity: widget.onImportActivity,
+                onResetData: widget.onResetData,
+              ),
+            ),
+          ),
+          const SizedBox(height: 15),
 
-                  // PASS LOCAL STATE & HANDLERS
-                  knownRooms: widget.knownRooms,
-                  runoutMutedRooms: _runoutMutedRooms,
-                  usageMutedRooms: _usageMutedRooms,
-                  onRunoutMutedChanged: (newSet) {
-                    setState(() => _runoutMutedRooms = newSet);
-                    widget.onRunoutMutedChanged(newSet);
-                  },
-                  onUsageMutedChanged: (newSet) {
-                    setState(() => _usageMutedRooms = newSet);
-                    widget.onUsageMutedChanged(newSet);
-                  },
-                ),
-                const SizedBox(height: 30),
-
-                DataSettings(
-                  onImportInventory: widget.onImportInventory,
-                  onImportActivity: widget.onImportActivity,
-                  onResetData: widget.onResetData,
-                ),
-                const SizedBox(height: 30),
-
-                InfoSettings(appVersion: widget.appVersion),
-                const SizedBox(height: 50),
-              ],
+          _SettingsTile(
+            icon: Icons.info_outline,
+            title: "Info",
+            subtitle: "v${widget.appVersion}",
+            onTap: () => _pushSubPage(
+              "App Info",
+              InfoSettings(appVersion: widget.appVersion),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _SettingsTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final VoidCallback onTap;
+
+  const _SettingsTile({
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        height: 70,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          gradient: LinearGradient(
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
+            colors: [
+              theme.colorScheme.primary.withOpacity(0.1),
+              theme.colorScheme.primary.withOpacity(0.4),
+            ],
+            stops: const [0.0, 1.0],
+          ),
+          border: Border.all(color: theme.dividerColor.withOpacity(0.1)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary.withOpacity(0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, color: theme.colorScheme.primary, size: 20),
+              ),
+              const SizedBox(width: 20),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                        color: theme.colorScheme.onSurface,
+                      ),
+                    ),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle!,
+                        style: TextStyle(
+                          color: theme.colorScheme.onSurface.withOpacity(0.6),
+                          fontSize: 11,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.arrow_forward_ios,
+                color: Colors.black,
+                size: 16,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

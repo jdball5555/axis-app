@@ -1,36 +1,20 @@
 import 'dart:async';
+import 'dart:convert';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../models/inventory_item.dart';
 import '../services/firestore_service.dart';
-import '../services/notification_service.dart';
 
-// --- BACKGROUND FUNCTIONS ---
-
+// --- BACKGROUND FUNCTIONS (ISOLATE LOGIC) ---
 DateTime? _parseDateStatic(String dateStr) {
   try {
     return DateTime.parse(dateStr);
   } catch (_) {
-    try {
-      List<String> parts = dateStr.trim().split(' ');
-      if (parts.length >= 2) {
-        List<String> d = parts[0].split('-');
-        List<String> t = parts[1].split(':');
-        return DateTime(
-          int.parse(d[0]),
-          int.parse(d[1]),
-          int.parse(d[2]),
-          int.parse(t[0]),
-          int.parse(t[1]),
-          int.parse(t[2]),
-        );
-      }
-      return null;
-    } catch (e) {
-      return null;
-    }
+    return null;
   }
 }
 
@@ -42,9 +26,9 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
   final int runoutThreshold = input['threshold'];
   final Set<String> ignored = Set<String>.from(input['ignored']);
 
-  // SEPARATE SETTINGS
-  final bool runoutEnabled = input['runoutEnabled'];
-  final bool usageEnabled = input['usageEnabled'];
+  final bool runoutEnabled = true;
+  final bool usageEnabled = true;
+
   final Set<String> runoutMuted = Set<String>.from(input['runoutMuted']);
   final Set<String> usageMuted = Set<String>.from(input['usageMuted']);
 
@@ -52,30 +36,24 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
       .map((e) => InventoryItem.fromJson(e))
       .toList();
   DateTime now = DateTime.now();
-
   List<Map<String, dynamic>> tempRestock = [];
   List<Map<String, dynamic>> tempUsage = [];
 
   for (var item in items.where((i) => i.type == 'Item')) {
     if (ignored.contains(item.name)) continue;
-
     List<DateTime> usageDates = [];
-
     for (var log in rawLogs) {
-      // Strict Match: Name + Room
       String logName = log['item'] ?? "";
       String logRoom = log['room'] ?? "";
       bool matchName = logName == item.name;
       bool matchRoom =
           logRoom == (item.roomLocation ?? "Unknown") ||
           logRoom == (item.roomLocation ?? "N/A");
-
       if (matchName && matchRoom && (log['action'].contains("USED"))) {
         DateTime? dt = _parseDateStatic(log['timestamp'] ?? "");
         if (dt != null) usageDates.add(dt);
       }
     }
-
     if (usageDates.length >= 2) {
       usageDates.sort();
       DateTime lastUse = usageDates.last;
@@ -88,22 +66,18 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
       int daysSinceLast = now.difference(lastUse).inDays;
       int daysLeft = (stockDuration - daysSinceLast).round();
 
-      // --- CHECK RUNOUT ---
-      // Only show if feature enabled AND room not muted
-      bool showRestock =
-          runoutEnabled &&
-          (item.roomLocation == null ||
-              !runoutMuted.contains(item.roomLocation));
+      bool isRoomMutedForRunout =
+          item.roomLocation != null && runoutMuted.contains(item.roomLocation);
+      bool showRestock = runoutEnabled && !isRoomMutedForRunout;
+
       if (showRestock && daysLeft < runoutThreshold) {
         tempRestock.add({'item': item, 'daysLeft': daysLeft});
       }
 
-      // --- CHECK USAGE ---
-      // Only show if feature enabled AND room not muted
-      bool showUsage =
-          usageEnabled &&
-          (item.roomLocation == null ||
-              !usageMuted.contains(item.roomLocation));
+      bool isRoomMutedForUsage =
+          item.roomLocation != null && usageMuted.contains(item.roomLocation);
+      bool showUsage = usageEnabled && !isRoomMutedForUsage;
+
       if (showUsage && daysSinceLast > (avgRate * 1.5) && item.quantity > 0) {
         tempUsage.add({
           'item': item,
@@ -112,7 +86,6 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
       }
     }
   }
-
   tempRestock.sort(
     (a, b) => (a['daysLeft'] as int).compareTo(b['daysLeft'] as int),
   );
@@ -120,18 +93,7 @@ Map<String, List<Map<String, dynamic>>> _computeHomeAlerts(
 }
 
 class HomeTab extends StatefulWidget {
-  final bool runoutEnabled;
-  final bool usageEnabled;
-  final Set<String> runoutMutedRooms;
-  final Set<String> usageMutedRooms;
-
-  const HomeTab({
-    super.key,
-    required this.runoutEnabled,
-    required this.usageEnabled,
-    required this.runoutMutedRooms,
-    required this.usageMutedRooms,
-  });
+  const HomeTab({super.key});
 
   @override
   State<HomeTab> createState() => _HomeTabState();
@@ -141,15 +103,26 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
   late Timer _timer;
   DateTime _currentTime = DateTime.now();
   bool _isLoading = true;
+  String _currentHouseholdName = "Current Household";
+
+  List<Map<String, dynamic>> _cachedItems = [];
+  List<Map<String, dynamic>> _cachedLogs = [];
   List<Map<String, dynamic>> _restockAlerts = [];
   List<Map<String, dynamic>> _usageAlerts = [];
-  final Set<String> _ignoredUsageAlerts = {};
-
-  // Invite Stream
-  late Stream<List<Map<String, dynamic>>> _inviteStream;
   List<Map<String, dynamic>> _currentInvites = [];
+  Set<String> _ignoredUsageAlerts = {};
 
+  StreamSubscription? _itemSub;
+  StreamSubscription? _logSub;
+  late Stream<List<Map<String, dynamic>>> _inviteStream;
+  String _activeStreamId = "";
   final FirestoreService _db = FirestoreService();
+
+  List<Map<String, dynamic>> _layoutConfig = [
+    {'id': 'hero', 'scale': 1.0},
+    {'id': 'feed', 'scale': 1.0},
+  ];
+  Set<String> _activeHomeTiles = {'invitations'};
 
   @override
   bool get wantKeepAlive => true;
@@ -157,46 +130,165 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
   @override
   void initState() {
     super.initState();
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (mounted) setState(() => _currentTime = DateTime.now());
-    });
-    _runSmartLogic();
+    _loadLayoutAndPrefs();
+    _loadIgnoredAlerts(); // Load ignored list
+    _setupStreams();
 
-    // Setup Invite Listener
-    _inviteStream = _db.getInvitationsStream();
-    _inviteStream.listen((invites) async {
-      if (invites.length > _currentInvites.length) {
-        final prefs = await SharedPreferences.getInstance();
-        if (prefs.getBool('axis_notif_invites') ?? true) {
-          final newInvite = invites.first;
-          NotificationService().scheduleSmartAlert(
-            id: 888,
-            title: "New Inventory Invite",
-            body:
-                "${newInvite['inviterName']} invited you to ${newInvite['householdName']}",
-            date: DateTime.now(),
-            time: TimeOfDay.now(),
-            payload: 'invite',
-          );
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() => _currentTime = DateTime.now());
+        final String serviceId = _db.currentHouseholdId ?? "";
+        if (serviceId.isNotEmpty && serviceId != _activeStreamId) {
+          _setupStreams();
         }
       }
+    });
+
+    _inviteStream = _db.getInvitationsStream();
+    _inviteStream.listen((invites) async {
       if (mounted) setState(() => _currentInvites = invites);
     });
+
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted && _isLoading) setState(() => _isLoading = false);
+    });
+  }
+
+  Future<void> _loadLayoutAndPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedTiles = prefs.getStringList('axis_active_home_tiles');
+    if (savedTiles != null) {
+      if (mounted) setState(() => _activeHomeTiles = savedTiles.toSet());
+    }
+
+    final jsonStr = prefs.getString('axis_hp_layout_config');
+    if (jsonStr != null) {
+      try {
+        List<dynamic> decoded = jsonDecode(jsonStr);
+        if (mounted) {
+          setState(() {
+            _layoutConfig = decoded
+                .map((e) => Map<String, dynamic>.from(e))
+                .toList();
+          });
+        }
+      } catch (e) {}
+    }
+  }
+
+  // --- PERSISTENCE FOR IGNORED ALERTS ---
+  Future<void> _loadIgnoredAlerts() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList('axis_ignored_usage_alerts') ?? [];
+    if (mounted) setState(() => _ignoredUsageAlerts = list.toSet());
+  }
+
+  Future<void> _saveIgnoredAlerts() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      'axis_ignored_usage_alerts',
+      _ignoredUsageAlerts.toList(),
+    );
+  }
+  // --------------------------------------
+
+  @override
+  void didUpdateWidget(HomeTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _loadLayoutAndPrefs();
   }
 
   @override
   void dispose() {
     _timer.cancel();
+    _itemSub?.cancel();
+    _logSub?.cancel();
     super.dispose();
   }
 
-  Future<void> _runSmartLogic() async {
+  void _setupStreams() async {
+    _itemSub?.cancel();
+    _logSub?.cancel();
+    final String currentId = _db.currentHouseholdId ?? "";
+    _activeStreamId = currentId;
+    if (currentId.isEmpty) {
+      if (mounted) setState(() => _isLoading = false);
+      return;
+    }
+    setState(() => _isLoading = true);
+
+    _itemSub = _db.inventoryCollection.snapshots().listen((snapshot) {
+      if (!mounted) return;
+
+      // --- CRITICAL FIX: SANITIZE ITEMS ---
+      // We must convert Timestamps in ITEMS too, not just LOGS.
+      _cachedItems = snapshot.docs.map((d) {
+        final data = d.data() as Map<String, dynamic>;
+
+        // Sanitize any timestamp fields in the Item (e.g. lastUpdated)
+        data.forEach((key, value) {
+          if (value is Timestamp) {
+            data[key] = value.toDate().toString();
+          }
+        });
+
+        return data;
+      }).toList();
+      // ------------------------------------
+
+      _recalculateAlerts();
+    });
+
+    _logSub = _db.logCollection.orderBy('timestamp').snapshots().listen((
+      snapshot,
+    ) {
+      if (!mounted) return;
+
+      // --- SAFE LOG CONVERSION ---
+      _cachedLogs = snapshot.docs.map((d) {
+        final data = d.data() as Map<String, dynamic>;
+        if (data['timestamp'] is Timestamp) {
+          data['timestamp'] = (data['timestamp'] as Timestamp)
+              .toDate()
+              .toString();
+        }
+        return data;
+      }).toList();
+      // ---------------------------
+
+      _recalculateAlerts();
+    });
+
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('households')
+          .doc(currentId)
+          .get();
+      if (doc.exists && mounted) {
+        setState(
+          () => _currentHouseholdName = doc.data()?['name'] ?? "My Inventory",
+        );
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _recalculateAlerts() async {
+    if (_cachedItems.isEmpty) {
+      if (mounted) setState(() => _isLoading = false);
+      return;
+    }
     try {
       final prefs = await SharedPreferences.getInstance();
-      List<String>? savedThresholds = prefs.getStringList(
-        'axis_runout_thresholds',
-      );
+      String currentId = _activeStreamId;
 
+      List<String> mutedRunoutList =
+          prefs.getStringList('axis_muted_runout_rooms_$currentId') ?? [];
+      List<String> mutedUsageList =
+          prefs.getStringList('axis_muted_usage_rooms_$currentId') ?? [];
+
+      List<String>? savedThresholds = prefs.getStringList(
+        'axis_runout_thresholds_$currentId',
+      );
       int runoutThreshold = 7;
       if (savedThresholds != null && savedThresholds.isNotEmpty) {
         runoutThreshold = savedThresholds
@@ -204,32 +296,15 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
             .reduce((a, b) => a > b ? a : b);
       }
 
-      final invSnap = await _db.inventoryCollection.get();
-      final logSnap = await _db.logCollection.orderBy('timestamp').get();
-
-      List<Map<String, dynamic>> rawItems = invSnap.docs
-          .map((d) => d.data() as Map<String, dynamic>)
-          .toList();
-      List<Map<String, dynamic>> rawLogs = logSnap.docs
-          .map((d) => d.data() as Map<String, dynamic>)
-          .toList();
-
-      if (rawItems.isEmpty) {
-        if (mounted) setState(() => _isLoading = false);
-        return;
-      }
-
       final results = await compute(_computeHomeAlerts, {
-        'items': rawItems,
-        'logs': rawLogs,
+        'items': _cachedItems,
+        'logs': _cachedLogs,
         'threshold': runoutThreshold,
         'ignored': _ignoredUsageAlerts.toList(),
-
-        // PASS SEPARATE CONFIGS
-        'runoutEnabled': widget.runoutEnabled,
-        'usageEnabled': widget.usageEnabled,
-        'runoutMuted': widget.runoutMutedRooms.toList(),
-        'usageMuted': widget.usageMutedRooms.toList(),
+        'runoutEnabled': true,
+        'usageEnabled': true,
+        'runoutMuted': mutedRunoutList,
+        'usageMuted': mutedUsageList,
       });
 
       if (mounted) {
@@ -244,8 +319,6 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
     }
   }
 
-  // --- ACTIONS ---
-
   void _dismissUsageAlert(InventoryItem item, bool confirmed) {
     if (!confirmed) {
       setState(() {
@@ -254,6 +327,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
           (element) => (element['item'] as InventoryItem).name == item.name,
         );
       });
+      _saveIgnoredAlerts(); // Save to prefs
     } else {
       _processUsageLog(item);
     }
@@ -269,10 +343,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
         (d, a) {},
       ),
     );
-
     if (confirm != true) return;
-    setState(() => _isLoading = true);
-
     int newQty = (item.quantity - 1).clamp(0, 9999);
     await _db.updateQuantity(item.name, item.roomLocation, newQty);
     await _db.logActivity(
@@ -282,13 +353,10 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
       -1,
       newQty,
     );
-
+    // Auto-ignore after action so it doesn't show again immediately
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text("Logged usage for ${item.name}.")));
-      _ignoredUsageAlerts.add(item.name);
-      _runSmartLogic();
+      setState(() => _ignoredUsageAlerts.add(item.name));
+      _saveIgnoredAlerts();
     }
   }
 
@@ -359,10 +427,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
         },
       ),
     );
-
     if (confirm != true) return;
-    setState(() => _isLoading = true);
-
     int newQty = item.quantity + quantityToAdd;
     await _db.updateQuantity(item.name, item.roomLocation, newQty);
     await _db.logActivity(
@@ -372,16 +437,43 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
       quantityToAdd,
       newQty,
     );
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Added $quantityToAdd to ${item.name}.")),
-      );
-      _runSmartLogic();
-    }
   }
 
-  // --- WIDGET BUILDERS ---
+  // --- DIRECT DATABASE OPERATIONS FOR HOME PAGE ---
+  Future<void> _handleDecline(String inviteId) async {
+    setState(() {
+      _currentInvites.removeWhere((i) => i['id'] == inviteId);
+    });
+    await FirebaseFirestore.instance
+        .collection('invitations')
+        .doc(inviteId)
+        .delete();
+  }
+
+  Future<void> _handleAccept(String inviteId, String householdId) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    setState(() {
+      _currentInvites.removeWhere((i) => i['id'] == inviteId);
+    });
+
+    await FirebaseFirestore.instance
+        .collection('households')
+        .doc(householdId)
+        .update({
+          'members': FieldValue.arrayUnion([user.uid]),
+        });
+
+    await FirebaseFirestore.instance.collection('users').doc(user.uid).update({
+      'joinedHouseholds': FieldValue.arrayUnion([householdId]),
+    });
+
+    await FirebaseFirestore.instance
+        .collection('invitations')
+        .doc(inviteId)
+        .delete();
+  }
 
   Widget _buildDatePickerButton(
     BuildContext context,
@@ -491,98 +583,108 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
   Widget build(BuildContext context) {
     super.build(context);
     final theme = Theme.of(context);
-    final isLandscape =
-        MediaQuery.of(context).orientation == Orientation.landscape;
-    final topPadding = isLandscape ? 20.0 : 140.0;
 
-    List<Widget> tiles = [];
+    List<Widget> feedTiles = [];
 
-    // 1. INVITE TILES (High Priority)
-    for (var invite in _currentInvites) {
-      tiles.add(_buildInviteTile(theme, invite));
+    // --- CHECK PREFERENCE BEFORE SHOWING INVITES ---
+    if (_activeHomeTiles.contains('invitations')) {
+      for (var invite in _currentInvites) {
+        feedTiles.add(_buildInviteTile(theme, invite));
+      }
     }
 
-    // 2. ALERT TILES
-    for (var alert in _restockAlerts) {
-      tiles.add(
+    for (var alert in _restockAlerts)
+      feedTiles.add(
         _buildRestockAlert(
           theme,
           alert['item'] as InventoryItem,
           alert['daysLeft'] as int,
+          _currentHouseholdName,
         ),
       );
-    }
-    for (var alert in _usageAlerts) {
-      tiles.add(
+    for (var alert in _usageAlerts)
+      feedTiles.add(
         _buildUsageCheckAlert(
           theme,
           alert['item'] as InventoryItem,
           alert['expectedDate'] as DateTime,
+          _currentHouseholdName,
+        ),
+      );
+    if (feedTiles.isEmpty && !_isLoading)
+      feedTiles.add(_buildAllClearTile(theme));
+
+    List<Widget> layoutWidgets = [];
+    for (var config in _layoutConfig) {
+      String id = config['id'];
+      double scale = config['scale'] ?? 1.0;
+
+      double screenWidth = MediaQuery.of(context).size.width;
+      double fullWidth = screenWidth - 40;
+      double currentWidth = (fullWidth * scale).clamp(100.0, fullWidth);
+      double currentHeight = (160 * scale).clamp(80.0, 300.0);
+
+      Widget content;
+      if (id == 'hero') {
+        content = _buildHeroTile(theme, currentHeight);
+      } else {
+        content = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 15, left: 5),
+              child: Text(
+                "INSIGHTS",
+                style: TextStyle(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 2.0,
+                ),
+              ),
+            ),
+            ...feedTiles,
+          ],
+        );
+      }
+
+      layoutWidgets.add(
+        SizedBox(
+          width: currentWidth,
+          height: id == 'hero' ? currentHeight : null,
+          child: content,
         ),
       );
     }
 
-    if (tiles.isEmpty && !_isLoading) {
-      tiles.add(_buildAllClearTile(theme));
-    }
-
-    return Padding(
-      padding: EdgeInsets.only(
-        top: topPadding,
-        left: 20,
-        right: 20,
-        bottom: 20,
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: SafeArea(
+        child: _isLoading
+            ? Center(
+                child: CircularProgressIndicator(
+                  color: theme.colorScheme.primary,
+                ),
+              )
+            : SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(spacing: 12, runSpacing: 20, children: layoutWidgets),
+                    const SizedBox(height: 100),
+                  ],
+                ),
+              ),
       ),
-      child: _isLoading
-          ? Center(
-              child: CircularProgressIndicator(
-                color: theme.colorScheme.primary,
-              ),
-            )
-          : SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildHeroTile(theme),
-                  const SizedBox(height: 20),
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 15, left: 5),
-                    child: Text(
-                      "INSIGHTS",
-                      style: TextStyle(
-                        color: theme.colorScheme.onSurfaceVariant,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 2.0,
-                      ),
-                    ),
-                  ),
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      int cols = constraints.maxWidth > 600 ? 2 : 1;
-                      if (cols == 1) return Column(children: tiles);
-                      double spacing = 15.0;
-                      double w =
-                          (constraints.maxWidth - (spacing * (cols - 1))) /
-                          cols;
-                      return Wrap(
-                        spacing: spacing,
-                        runSpacing: spacing,
-                        children: tiles
-                            .map(
-                              (w_child) => SizedBox(width: w, child: w_child),
-                            )
-                            .toList(),
-                      );
-                    },
-                  ),
-                ],
-              ),
-            ),
     );
   }
 
-  // --- TILE DESIGNS ---
+  // ... (Keep the rest of your _build methods - they are UI and work fine) ...
+  // (Paste the existing _buildInviteTile, _buildHeroTile, etc. here if re-copying)
+  // ...
+
+  // To ensure the file is complete, I will include the existing methods below:
 
   Widget _buildInviteTile(ThemeData theme, Map<String, dynamic> invite) {
     return Container(
@@ -649,7 +751,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
             children: [
               Expanded(
                 child: OutlinedButton(
-                  onPressed: () => _db.declineInvitation(invite['id']),
+                  onPressed: () => _handleDecline(invite['id']),
                   child: const Text("Decline"),
                 ),
               ),
@@ -657,7 +759,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
               Expanded(
                 child: ElevatedButton(
                   onPressed: () =>
-                      _db.acceptInvitation(invite['id'], invite['householdId']),
+                      _handleAccept(invite['id'], invite['householdId']),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: theme.colorScheme.primary,
                     foregroundColor: Colors.black,
@@ -672,14 +774,13 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
     );
   }
 
-  Widget _buildHeroTile(ThemeData theme) {
+  Widget _buildHeroTile(ThemeData theme, double height) {
     String timeString = DateFormat('h:mm').format(_currentTime);
     String amPm = DateFormat('a').format(_currentTime);
     String dateString = DateFormat('MMMM d, y').format(_currentTime);
     String dayString = DateFormat('EEEE').format(_currentTime);
-
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 20),
+      padding: EdgeInsets.symmetric(vertical: height * 0.1, horizontal: 20),
       decoration: BoxDecoration(
         color: theme.cardColor,
         borderRadius: BorderRadius.circular(24),
@@ -692,63 +793,71 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
           ),
         ],
       ),
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
-            children: [
-              Text(
-                timeString,
-                style: TextStyle(
-                  fontSize: 70,
-                  fontWeight: FontWeight.bold,
-                  color: theme.colorScheme.onSurface,
-                  letterSpacing: -2,
-                  height: 1,
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Column(
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text(
+                  timeString,
+                  style: TextStyle(
+                    fontSize: 70,
+                    fontWeight: FontWeight.bold,
+                    color: theme.colorScheme.onSurface,
+                    letterSpacing: -2,
+                    height: 1,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 5),
-              Text(
-                amPm,
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
-                  color: theme.colorScheme.primary,
+                const SizedBox(width: 5),
+                Text(
+                  amPm,
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w600,
+                    color: theme.colorScheme.primary,
+                  ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Container(height: 2, width: 60, color: theme.dividerColor),
-          const SizedBox(height: 10),
-          Text(
-            dayString.toUpperCase(),
-            style: TextStyle(
-              fontSize: 14,
-              letterSpacing: 3.0,
-              color: theme.colorScheme.onSurfaceVariant,
-              fontWeight: FontWeight.bold,
+              ],
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            dateString,
-            style: TextStyle(fontSize: 18, color: theme.colorScheme.onSurface),
-          ),
-        ],
+            const SizedBox(height: 10),
+            Container(height: 2, width: 60, color: theme.dividerColor),
+            const SizedBox(height: 10),
+            Text(
+              dayString.toUpperCase(),
+              style: TextStyle(
+                fontSize: 14,
+                letterSpacing: 3.0,
+                color: theme.colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              dateString,
+              style: TextStyle(
+                fontSize: 18,
+                color: theme.colorScheme.onSurface,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _buildRestockAlert(ThemeData theme, InventoryItem item, int daysLeft) {
+  Widget _buildRestockAlert(
+    ThemeData theme,
+    InventoryItem item,
+    int daysLeft,
+    String householdName,
+  ) {
     Color color = Colors.redAccent;
     List<TextSpan> textSpans;
-
-    // UPDATED TEXT: Include Room Name
     String displayText = "${item.name} (${item.roomLocation ?? 'Unknown'})";
-
     if (daysLeft <= 0) {
       textSpans = [
         TextSpan(
@@ -778,7 +887,7 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
       ];
     }
     return Container(
-      margin: const EdgeInsets.only(bottom: 15),
+      margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: color.withOpacity(0.1),
@@ -822,6 +931,15 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
                         children: textSpans,
                       ),
                     ),
+                    const SizedBox(height: 4),
+                    Text(
+                      "Inventory: $householdName",
+                      style: TextStyle(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontSize: 12,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -854,11 +972,12 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
     ThemeData theme,
     InventoryItem item,
     DateTime expectedDate,
+    String householdName,
   ) {
     Color color = theme.colorScheme.primary;
     String dateStr = DateFormat('MMM d').format(expectedDate);
     return Container(
-      margin: const EdgeInsets.only(bottom: 15),
+      margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: theme.cardColor,
@@ -892,7 +1011,6 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
                       ),
                     ),
                     const SizedBox(height: 4),
-                    // UPDATED TEXT: Include Room Name
                     Text(
                       "Did you use ${item.name} in ${item.roomLocation ?? 'Unknown'}?",
                       style: TextStyle(
@@ -907,6 +1025,15 @@ class _HomeTabState extends State<HomeTab> with AutomaticKeepAliveClientMixin {
                       style: TextStyle(
                         color: theme.colorScheme.onSurfaceVariant,
                         fontSize: 14,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      "Inventory: $householdName",
+                      style: TextStyle(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontSize: 12,
+                        fontStyle: FontStyle.italic,
                       ),
                     ),
                   ],

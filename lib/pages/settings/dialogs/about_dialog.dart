@@ -48,7 +48,7 @@ void showAxisAboutDialog(BuildContext context, String appVersion) {
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
-          "v$appVersion", // Ensure 0.5.0 is passed here or hardcode "v0.5.0" if preferred
+          "v$appVersion",
           style: TextStyle(
             color: theme.colorScheme.onSurfaceVariant,
             fontSize: 10,
@@ -65,10 +65,9 @@ void showAxisAboutDialog(BuildContext context, String appVersion) {
       Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          // Removed "Local", added "Sync"
-          _buildFeature(theme, Icons.notifications_active, "Alerts"),
+          _buildFeature(theme, Icons.cloud_queue, "Cloud"),
           _buildFeature(theme, Icons.group, "Shared"),
-          _buildFeature(theme, Icons.cloud_sync, "Sync"),
+          _buildFeature(theme, Icons.settings_suggest, "Rework"),
         ],
       ),
       const SizedBox(height: 20),
@@ -92,8 +91,7 @@ void showAxisAboutDialog(BuildContext context, String appVersion) {
             ),
             const SizedBox(height: 8),
             Text(
-              // Updated What's New text
-              "• Shared Lists & Groups\n• Smarter Notifications\n• Cloud Synchronization",
+              "• Cloud-Powered Alerts\n• Customizable Home Page\n• Redesigned Settings\n• Unified Inventory Logic",
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: theme.colorScheme.onSurfaceVariant,

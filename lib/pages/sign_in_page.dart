@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../main.dart'; // Import to access AxisApp
 
 class SignInPage extends StatefulWidget {
   const SignInPage({super.key});
@@ -15,10 +16,10 @@ class _SignInPageState extends State<SignInPage> {
 
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
-  final TextEditingController _nameController = TextEditingController(); // NEW
+  final TextEditingController _nameController = TextEditingController();
 
   bool _isLoading = false;
-  bool _isLogin = true; // Toggle between Login and Sign Up
+  bool _isLogin = true;
 
   Future<void> _submit() async {
     setState(() => _isLoading = true);
@@ -46,16 +47,22 @@ class _SignInPageState extends State<SignInPage> {
           await cred.user!.updateDisplayName(_nameController.text.trim());
 
           // 3. Create User Document in Firestore
-          // This ensures the profile exists immediately for invites/sharing
           await _db.collection('users').doc(cred.user!.uid).set({
             'email': _emailController.text.trim(),
             'displayName': _nameController.text.trim(),
             'createdAt': FieldValue.serverTimestamp(),
             'joinedHouseholds': [],
-            'currentHouseholdId':
-                null, // Will be set by FirestoreService.init()
+            'currentHouseholdId': null,
           });
         }
+      }
+
+      // --- SUCCESS: NAVIGATE TO APP ROOT ---
+      if (mounted) {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (context) => const AxisApp()),
+          (route) => false,
+        );
       }
     } on FirebaseAuthException catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -78,7 +85,6 @@ class _SignInPageState extends State<SignInPage> {
 
   @override
   Widget build(BuildContext context) {
-    // Determine colors based on system theme since we are outside the main app shell
     final isDark = MediaQuery.of(context).platformBrightness == Brightness.dark;
     final bgColor = isDark ? const Color(0xFF121212) : const Color(0xFFF5F5F5);
     final textColor = isDark ? Colors.white : Colors.black87;
@@ -92,14 +98,22 @@ class _SignInPageState extends State<SignInPage> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Logo / Icon
+              // --- LOGO / ICON ---
               Container(
+                height: 120,
+                width: 120,
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
                   color: primaryColor.withOpacity(0.1),
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.hub, size: 60, color: primaryColor),
+                child: Image.asset(
+                  'assets/icon.png',
+                  fit: BoxFit.contain,
+                  errorBuilder: (context, error, stackTrace) {
+                    return const Icon(Icons.hub, size: 60, color: primaryColor);
+                  },
+                ),
               ),
               const SizedBox(height: 30),
 
@@ -172,10 +186,11 @@ class _SignInPageState extends State<SignInPage> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: primaryColor,
                     foregroundColor: Colors.black,
+                    elevation:
+                        0, // FIXED: Moved here, outside of RoundedRectangleBorder
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    elevation: 0,
                   ),
                   onPressed: _isLoading ? null : _submit,
                   child: _isLoading

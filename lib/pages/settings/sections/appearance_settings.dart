@@ -1,14 +1,12 @@
 import 'package:flutter/material.dart';
-import '../widgets/settings_section.dart';
 import '../widgets/color_wheel_picker.dart';
+import '../widgets/settings_widgets.dart'; // Import the new reusable widgets
 
-class AppearanceSettings extends StatelessWidget {
+class AppearanceSettings extends StatefulWidget {
   final bool isLightMode;
   final Function(bool) onThemeChanged;
   final Color currentPrimaryColor;
   final Function(Color) onColorChanged;
-
-  static const Color _defaultColor = Color(0xFF00C897);
 
   const AppearanceSettings({
     super.key,
@@ -18,6 +16,32 @@ class AppearanceSettings extends StatelessWidget {
     required this.onColorChanged,
   });
 
+  @override
+  State<AppearanceSettings> createState() => _AppearanceSettingsState();
+}
+
+class _AppearanceSettingsState extends State<AppearanceSettings> {
+  static const Color _defaultColor = Color(0xFF00C897);
+  late Color _displayColor;
+
+  @override
+  void initState() {
+    super.initState();
+    _displayColor = widget.currentPrimaryColor;
+  }
+
+  void _handleColorChange(Color newColor) {
+    setState(() {
+      _displayColor = newColor;
+    });
+    widget.onColorChanged(newColor);
+  }
+
+  void _handleThemeChange(bool value) {
+    widget.onThemeChanged(value);
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
   void _showColorPicker(BuildContext context) {
     showDialog(
       context: context,
@@ -25,7 +49,6 @@ class AppearanceSettings extends StatelessWidget {
         backgroundColor: Theme.of(context).cardColor,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         child: SingleChildScrollView(
-          // Wrapped in ScrollView to prevent cut-off in landscape
           child: Padding(
             padding: const EdgeInsets.all(20),
             child: Column(
@@ -40,17 +63,15 @@ class AppearanceSettings extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 20),
-                // Fixed Size for the Wheel
                 SizedBox(
                   height: 250,
                   width: 250,
                   child: ColorWheelPicker(
-                    initialColor: currentPrimaryColor,
-                    onColorChanged: onColorChanged,
+                    initialColor: _displayColor,
+                    onColorChanged: _handleColorChange,
                   ),
                 ),
                 const SizedBox(height: 20),
-                // Buttons
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -59,13 +80,13 @@ class AppearanceSettings extends StatelessWidget {
                       label: const Text("Reset"),
                       style: TextButton.styleFrom(foregroundColor: Colors.grey),
                       onPressed: () {
-                        onColorChanged(_defaultColor);
+                        _handleColorChange(_defaultColor);
                         Navigator.pop(ctx);
                       },
                     ),
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Theme.of(context).colorScheme.primary,
+                        backgroundColor: _displayColor,
                         foregroundColor: Colors.black,
                       ),
                       onPressed: () => Navigator.pop(ctx),
@@ -83,70 +104,41 @@ class AppearanceSettings extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final isDark = !widget.isLightMode;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return ResponsiveSettingsGrid(
       children: [
-        Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: Text(
-            "APPEARANCE",
-            style: TextStyle(
-              color: theme.colorScheme.primary,
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 1.5,
+        // --- TILE 1: DARK MODE ---
+        GradientSettingsTile(
+          icon: isDark ? Icons.nightlight_round : Icons.wb_sunny_outlined,
+          title: "Dark Mode",
+          subtitle: isDark ? "On" : "Off",
+          trailing: Switch(
+            value: isDark,
+            activeColor: _displayColor,
+            onChanged: (val) => _handleThemeChange(!val),
+          ),
+          onTap: () => _handleThemeChange(!isDark),
+        ),
+
+        // --- TILE 2: ACCENT COLOR ---
+        GradientSettingsTile(
+          icon: Icons.palette_outlined,
+          title: "Accent Color",
+          subtitle: "Tap to change",
+          trailing: Container(
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              color: _displayColor,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 2),
+              boxShadow: [
+                BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 4),
+              ],
             ),
           ),
-        ),
-        SettingsSection(
-          children: [
-            SwitchListTile(
-              title: Text(
-                "Dark Mode",
-                style: TextStyle(
-                  color: theme.colorScheme.onSurface,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              secondary: Icon(
-                !isLightMode ? Icons.nightlight_round : Icons.wb_sunny_outlined,
-                color: theme.iconTheme.color,
-              ),
-              value: !isLightMode,
-              activeColor: theme.colorScheme.primary,
-              onChanged: (val) => onThemeChanged(!val),
-            ),
-            Divider(color: theme.dividerColor, height: 1),
-            ListTile(
-              title: Text(
-                "Accent Color",
-                style: TextStyle(
-                  color: theme.colorScheme.onSurface,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              trailing: GestureDetector(
-                onTap: () => _showColorPicker(context),
-                child: Container(
-                  width: 30,
-                  height: 30,
-                  decoration: BoxDecoration(
-                    color: currentPrimaryColor,
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 2),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.2),
-                        blurRadius: 4,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
+          onTap: () => _showColorPicker(context),
         ),
       ],
     );

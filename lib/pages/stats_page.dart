@@ -9,7 +9,6 @@ import '../models/inventory_item.dart';
 class StatsPage extends StatefulWidget {
   const StatsPage({super.key});
 
-  // CACHE: Remembers title to prevent flickering
   static String? lastKnownName;
   static bool lastKnownShared = false;
 
@@ -19,6 +18,7 @@ class StatsPage extends StatefulWidget {
 
 class ConsumptionData {
   String itemName;
+  String room;
   int currentQuantity;
   double avgDaysPerUse;
   int daysUntilRunout;
@@ -29,6 +29,7 @@ class ConsumptionData {
 
   ConsumptionData({
     required this.itemName,
+    required this.room,
     required this.currentQuantity,
     required this.avgDaysPerUse,
     required this.daysUntilRunout,
@@ -36,6 +37,24 @@ class ConsumptionData {
     required this.usageCount,
     this.projectedDate,
     required this.history,
+  });
+}
+
+class AggregateStat {
+  String itemName;
+  int totalQuantity;
+  double totalDailyUsageRate;
+  int locationCount;
+  int activeInUseCount;
+  int totalUsageCount;
+
+  AggregateStat({
+    required this.itemName,
+    this.totalQuantity = 0,
+    this.totalDailyUsageRate = 0.0,
+    this.locationCount = 0,
+    this.activeInUseCount = 0,
+    this.totalUsageCount = 0,
   });
 }
 
@@ -47,7 +66,6 @@ class _StatsPageState extends State<StatsPage>
   late Stream<List<InventoryItem>> _inventoryStream;
   late Stream<List<Map<String, dynamic>>> _logStream;
 
-  // Title Logic
   StreamSubscription<DocumentSnapshot>? _householdSub;
   String _currentSubscribedId = "";
   String _householdName = StatsPage.lastKnownName ?? "My Inventory";
@@ -94,7 +112,6 @@ class _StatsPageState extends State<StatsPage>
             final List members = data['members'] ?? [];
             final newShared = members.length > 1;
 
-            // Update Cache
             StatsPage.lastKnownName = newName;
             StatsPage.lastKnownShared = newShared;
 
@@ -150,13 +167,14 @@ class _StatsPageState extends State<StatsPage>
           return FutureBuilder<List<Map<String, dynamic>>>(
             future: _db.getHouseholdMembers(householdId),
             builder: (context, membersSnap) {
-              if (!membersSnap.hasData)
+              if (!membersSnap.hasData) {
                 return const AlertDialog(
                   content: SizedBox(
                     height: 50,
                     child: Center(child: CircularProgressIndicator()),
                   ),
                 );
+              }
               final members = membersSnap.data!;
 
               return AlertDialog(
@@ -224,35 +242,12 @@ class _StatsPageState extends State<StatsPage>
 
             final currentItems = invSnapshot.data ?? [];
             final logs = logSnapshot.data ?? [];
-
-            int tQty = 0;
-            Map<String, int> roomCounts = {};
-
-            Map<String, int> nameFrequency = {};
-            for (var item in currentItems.where((i) => i.type == 'Item')) {
-              nameFrequency[item.name] = (nameFrequency[item.name] ?? 0) + 1;
-            }
-
-            for (var item in currentItems) {
-              if (item.type == 'Room') {
-                if (!roomCounts.containsKey(item.name))
-                  roomCounts[item.name] = 0;
-              } else if (item.type == 'Item') {
-                tQty += item.quantity;
-                String loc = item.roomLocation ?? "Unknown";
-                roomCounts[loc] = (roomCounts[loc] ?? 0) + item.quantity;
-              }
-            }
-
-            List<ConsumptionData> consumptionList = [];
             DateTime now = DateTime.now();
 
+            List<ConsumptionData> allConsumption = [];
+
             for (var item in currentItems.where((i) => i.type == 'Item')) {
-              String displayName = item.name;
-              if ((nameFrequency[item.name] ?? 0) > 1) {
-                displayName =
-                    "${item.name} (${item.roomLocation ?? 'No Room'})";
-              }
+              String roomLoc = item.roomLocation ?? "Unknown";
 
               List<DateTime> usageDates = [];
               for (var log in logs) {
@@ -262,10 +257,7 @@ class _StatsPageState extends State<StatsPage>
                 String timestampStr = log['timestamp'] ?? "";
 
                 bool matchesItem = logName == item.name;
-                bool matchesRoom =
-                    logRoom == (item.roomLocation ?? "Unknown") ||
-                    logRoom == (item.roomLocation ?? "N/A");
-
+                bool matchesRoom = logRoom == roomLoc || logRoom == "N/A";
                 bool isUsage = action.contains("USED");
 
                 if (matchesItem && matchesRoom && isUsage) {
@@ -289,15 +281,17 @@ class _StatsPageState extends State<StatsPage>
                 if (intervals < 1) intervals = 1;
                 avgDays = totalSpan / intervals;
 
+                // FORMULA: (qty + 1) * rate
                 double stockDuration = (item.quantity + 1) * avgDays;
                 int daysSinceLast = now.difference(lastUse).inDays;
                 daysLeft = (stockDuration - daysSinceLast).round();
                 runoutDate = now.add(Duration(days: daysLeft));
               }
 
-              consumptionList.add(
+              allConsumption.add(
                 ConsumptionData(
-                  itemName: displayName,
+                  itemName: item.name,
+                  room: roomLoc,
                   currentQuantity: item.quantity,
                   avgDaysPerUse: avgDays,
                   daysUntilRunout: daysLeft,
@@ -309,13 +303,33 @@ class _StatsPageState extends State<StatsPage>
               );
             }
 
-            consumptionList.sort((a, b) {
-              if (a.hasEnoughData && !b.hasEnoughData) return -1;
-              if (!a.hasEnoughData && b.hasEnoughData) return 1;
-              if (a.hasEnoughData && b.hasEnoughData)
-                return a.daysUntilRunout.compareTo(b.daysUntilRunout);
-              return a.itemName.compareTo(b.itemName);
-            });
+            Map<String, AggregateStat> aggregateMap = {};
+            Map<String, List<ConsumptionData>> itemsByRoom = {};
+
+            for (var c in allConsumption) {
+              itemsByRoom.putIfAbsent(c.room, () => []).add(c);
+
+              if (!aggregateMap.containsKey(c.itemName)) {
+                aggregateMap[c.itemName] = AggregateStat(itemName: c.itemName);
+              }
+
+              var agg = aggregateMap[c.itemName]!;
+              agg.totalQuantity += c.currentQuantity;
+              agg.locationCount++;
+              agg.totalUsageCount += c.usageCount;
+
+              if (c.currentQuantity > 0) {
+                agg.activeInUseCount++;
+              }
+
+              if (c.hasEnoughData && c.avgDaysPerUse > 0) {
+                agg.totalDailyUsageRate += (1 / c.avgDaysPerUse);
+              }
+            }
+
+            List<AggregateStat> multiLocationItems = aggregateMap.values
+                .where((a) => a.locationCount > 1)
+                .toList();
 
             return Scaffold(
               backgroundColor: Colors.transparent,
@@ -327,7 +341,6 @@ class _StatsPageState extends State<StatsPage>
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        // NO STREAM BUILDER HERE - USES STATE VARIABLES
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -365,7 +378,7 @@ class _StatsPageState extends State<StatsPage>
                     ),
                     const SizedBox(height: 5),
                     Text(
-                      "Usage & Projections",
+                      "Inventory Forecasting",
                       style: TextStyle(color: onSurfaceVariant, fontSize: 14),
                     ),
                     const SizedBox(height: 20),
@@ -376,25 +389,43 @@ class _StatsPageState extends State<StatsPage>
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            if (multiLocationItems.isNotEmpty) ...[
+                              Text(
+                                "Household Overview",
+                                style: TextStyle(
+                                  color: primaryColor,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 5),
+                              Text(
+                                "Aggregate stock across all rooms",
+                                style: TextStyle(
+                                  color: onSurfaceVariant,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              const SizedBox(height: 15),
+                              _buildAggregateGrid(
+                                context,
+                                multiLocationItems,
+                                now,
+                              ),
+                              const SizedBox(height: 30),
+                            ],
+
                             Text(
-                              "Projected Runout",
+                              "Room Breakdown",
                               style: TextStyle(
                                 color: onSurface,
                                 fontSize: 18,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-                            const SizedBox(height: 5),
-                            Text(
-                              "Based on usage history",
-                              style: TextStyle(
-                                color: onSurfaceVariant,
-                                fontSize: 12,
-                              ),
-                            ),
                             const SizedBox(height: 15),
 
-                            if (consumptionList.isEmpty)
+                            if (itemsByRoom.isEmpty)
                               Container(
                                 padding: const EdgeInsets.all(20),
                                 width: double.infinity,
@@ -410,270 +441,30 @@ class _StatsPageState extends State<StatsPage>
                                 ),
                               )
                             else
-                              LayoutBuilder(
-                                builder: (context, constraints) {
-                                  int columns = 1;
-                                  if (constraints.maxWidth > 900) {
-                                    columns = 3;
-                                  } else if (constraints.maxWidth > 600) {
-                                    columns = 2;
-                                  }
-
-                                  double spacing = 15.0;
-                                  double itemWidth =
-                                      (constraints.maxWidth -
-                                          (spacing * (columns - 1))) /
-                                      columns;
-
-                                  return Wrap(
-                                    spacing: spacing,
-                                    runSpacing: spacing,
-                                    children: consumptionList.map((cData) {
-                                      Color statusColor;
-                                      String bigText;
-                                      String subText;
-                                      if (cData.hasEnoughData) {
-                                        if (cData.daysUntilRunout < 0) {
-                                          statusColor = Colors.redAccent;
-                                          bigText = "Due";
-                                          subText = "Overdue";
-                                        } else if (cData.daysUntilRunout < 7) {
-                                          statusColor = Colors.redAccent;
-                                          bigText = "${cData.daysUntilRunout}";
-                                          subText = "Days";
-                                        } else if (cData.daysUntilRunout < 30) {
-                                          statusColor = Colors.orangeAccent;
-                                          bigText = "${cData.daysUntilRunout}";
-                                          subText = "Days";
-                                        } else {
-                                          statusColor = primaryColor;
-                                          bigText = "${cData.daysUntilRunout}";
-                                          subText = "Days";
-                                        }
-                                      } else {
-                                        statusColor = onSurfaceVariant
-                                            .withOpacity(0.3);
-                                        bigText = "?";
-                                        subText = "N/A";
-                                      }
-
-                                      return SizedBox(
-                                        width: itemWidth,
-                                        child: Material(
-                                          color: Colors.transparent,
-                                          borderRadius: BorderRadius.circular(
-                                            15,
-                                          ),
-                                          child: InkWell(
-                                            borderRadius: BorderRadius.circular(
-                                              15,
-                                            ),
-                                            onTap: () {
-                                              Navigator.push(
-                                                context,
-                                                MaterialPageRoute(
-                                                  builder: (context) =>
-                                                      ItemGraphPage(
-                                                        itemName:
-                                                            cData.itemName,
-                                                        usageHistory:
-                                                            cData.history,
-                                                      ),
-                                                ),
-                                              );
-                                            },
-                                            child: Container(
-                                              padding: const EdgeInsets.all(15),
-                                              decoration: BoxDecoration(
-                                                color: cardColor,
-                                                borderRadius:
-                                                    BorderRadius.circular(15),
-                                                border: Border.all(
-                                                  color: dividerColor,
-                                                ),
-                                              ),
-                                              child: Row(
-                                                children: [
-                                                  Container(
-                                                    width: 50,
-                                                    height: 50,
-                                                    alignment: Alignment.center,
-                                                    decoration: BoxDecoration(
-                                                      shape: BoxShape.circle,
-                                                      border: Border.all(
-                                                        color: statusColor,
-                                                        width: 2,
-                                                      ),
-                                                      color: statusColor
-                                                          .withOpacity(0.1),
-                                                    ),
-                                                    child: Column(
-                                                      mainAxisAlignment:
-                                                          MainAxisAlignment
-                                                              .center,
-                                                      children: [
-                                                        Text(
-                                                          bigText,
-                                                          style: TextStyle(
-                                                            color: statusColor,
-                                                            fontWeight:
-                                                                FontWeight.bold,
-                                                            fontSize: 16,
-                                                          ),
-                                                        ),
-                                                        Text(
-                                                          subText,
-                                                          style: TextStyle(
-                                                            color:
-                                                                onSurfaceVariant,
-                                                            fontSize: 8,
-                                                          ),
-                                                        ),
-                                                      ],
-                                                    ),
-                                                  ),
-                                                  const SizedBox(width: 15),
-                                                  Expanded(
-                                                    child: Column(
-                                                      crossAxisAlignment:
-                                                          CrossAxisAlignment
-                                                              .start,
-                                                      children: [
-                                                        Text(
-                                                          cData.itemName,
-                                                          style: TextStyle(
-                                                            color: onSurface,
-                                                            fontSize: 16,
-                                                            fontWeight:
-                                                                FontWeight.bold,
-                                                          ),
-                                                          overflow: TextOverflow
-                                                              .ellipsis,
-                                                        ),
-                                                        const SizedBox(
-                                                          height: 4,
-                                                        ),
-                                                        if (cData
-                                                            .hasEnoughData) ...[
-                                                          Text(
-                                                            "Rate: 1 every ${cData.avgDaysPerUse.toStringAsFixed(1)} days",
-                                                            style: TextStyle(
-                                                              color:
-                                                                  onSurfaceVariant,
-                                                              fontSize: 12,
-                                                            ),
-                                                          ),
-                                                          if (cData
-                                                                  .projectedDate !=
-                                                              null)
-                                                            Padding(
-                                                              padding:
-                                                                  const EdgeInsets.only(
-                                                                    top: 2,
-                                                                  ),
-                                                              child: Text(
-                                                                "Empty: ${_formatSimpleDate(cData.projectedDate!)}",
-                                                                style: TextStyle(
-                                                                  color:
-                                                                      statusColor,
-                                                                  fontSize: 12,
-                                                                  fontWeight:
-                                                                      FontWeight
-                                                                          .bold,
-                                                                ),
-                                                              ),
-                                                            ),
-                                                        ] else
-                                                          Text(
-                                                            "Needs 2+ uses (Used ${cData.usageCount})",
-                                                            style: TextStyle(
-                                                              color:
-                                                                  onSurfaceVariant,
-                                                              fontSize: 12,
-                                                              fontStyle:
-                                                                  FontStyle
-                                                                      .italic,
-                                                            ),
-                                                          ),
-                                                        const SizedBox(
-                                                          height: 4,
-                                                        ),
-                                                        Text(
-                                                          "Stock: ${cData.currentQuantity}",
-                                                          style: TextStyle(
-                                                            color:
-                                                                onSurfaceVariant,
-                                                            fontSize: 12,
-                                                          ),
-                                                        ),
-                                                      ],
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                          ),
+                              ...itemsByRoom.entries.map((entry) {
+                                return Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Padding(
+                                      padding: const EdgeInsets.only(
+                                        left: 4,
+                                        bottom: 8,
+                                      ),
+                                      child: Text(
+                                        entry.key,
+                                        style: TextStyle(
+                                          color: onSurfaceVariant,
+                                          fontWeight: FontWeight.w600,
+                                          fontSize: 14,
                                         ),
-                                      );
-                                    }).toList(),
-                                  );
-                                },
-                              ),
-
-                            const SizedBox(height: 30),
-                            Text(
-                              "Room Distribution",
-                              style: TextStyle(
-                                color: onSurface,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            const SizedBox(height: 15),
-                            if (roomCounts.isEmpty)
-                              Center(
-                                child: Text(
-                                  "No items.",
-                                  style: TextStyle(color: onSurfaceVariant),
-                                ),
-                              )
-                            else
-                              ...roomCounts.entries.map((entry) {
-                                double pct = tQty > 0
-                                    ? entry.value / tQty
-                                    : 0.0;
-                                return Padding(
-                                  padding: const EdgeInsets.only(bottom: 10),
-                                  child: Column(
-                                    children: [
-                                      Row(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.spaceBetween,
-                                        children: [
-                                          Text(
-                                            entry.key,
-                                            style: TextStyle(color: onSurface),
-                                          ),
-                                          Text(
-                                            "${entry.value} items",
-                                            style: TextStyle(
-                                              color: primaryColor,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        ],
                                       ),
-                                      const SizedBox(height: 5),
-                                      LinearProgressIndicator(
-                                        value: pct,
-                                        backgroundColor: dividerColor,
-                                        color: primaryColor,
-                                        borderRadius: BorderRadius.circular(4),
-                                      ),
-                                    ],
-                                  ),
+                                    ),
+                                    _buildConsumptionGrid(context, entry.value),
+                                    const SizedBox(height: 20),
+                                  ],
                                 );
                               }),
+
                             const SizedBox(height: 80),
                           ],
                         ),
@@ -688,8 +479,409 @@ class _StatsPageState extends State<StatsPage>
       },
     );
   }
+
+  Widget _buildAggregateGrid(
+    BuildContext context,
+    List<AggregateStat> items,
+    DateTime now,
+  ) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        int columns = constraints.maxWidth > 600 ? 2 : 1;
+        double spacing = 15.0;
+        double itemWidth =
+            (constraints.maxWidth - (spacing * (columns - 1))) / columns;
+
+        return Wrap(
+          spacing: spacing,
+          runSpacing: spacing,
+          children: items.map((agg) {
+            bool hasEnoughData = agg.totalDailyUsageRate > 0;
+            String bigText = "?";
+            String subText = "N/A";
+            Color statusColor = Theme.of(
+              context,
+            ).colorScheme.onSurfaceVariant.withOpacity(0.3);
+            String projectedStr =
+                "Needs 2+ usages (Used ${agg.totalUsageCount})";
+
+            if (hasEnoughData) {
+              // Formula: (TotalQty + 1) / DailyRate - but Aggregate calculates differently above.
+              // Let's rely on totalQuantity / rate for aggregate rough estimate
+              // Or better, let the individual items sum up.
+              // Here we use a simplified projection for aggregate.
+              double daysLeftDouble =
+                  (agg.totalQuantity + 1) / agg.totalDailyUsageRate;
+              int daysLeft = daysLeftDouble.round();
+              DateTime projectedDate = now.add(Duration(days: daysLeft));
+
+              if (daysLeft < 0) {
+                statusColor = Colors.redAccent;
+                bigText = "Due";
+                subText = "Overdue";
+              } else if (daysLeft < 7) {
+                statusColor = Colors.redAccent;
+                bigText = "$daysLeft";
+                subText = "Days";
+              } else if (daysLeft < 30) {
+                statusColor = Colors.orangeAccent;
+                bigText = "$daysLeft";
+                subText = "Days";
+              } else {
+                statusColor = Theme.of(context).colorScheme.primary;
+                bigText = "$daysLeft";
+                subText = "Days";
+              }
+              projectedStr = "Empty: ${_formatSimpleDate(projectedDate)}";
+            }
+
+            return SizedBox(
+              width: itemWidth,
+              child: Container(
+                padding: const EdgeInsets.all(15),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).cardColor,
+                  borderRadius: BorderRadius.circular(15),
+                  border: Border.all(color: Theme.of(context).dividerColor),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.05),
+                      blurRadius: 5,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 50,
+                      height: 50,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(color: statusColor, width: 2),
+                        color: statusColor.withOpacity(0.1),
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            bigText,
+                            style: TextStyle(
+                              color: statusColor,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16,
+                            ),
+                          ),
+                          Text(
+                            subText,
+                            style: TextStyle(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                              fontSize: 8,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 15),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            agg.itemName,
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.onSurface,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            projectedStr,
+                            style: TextStyle(
+                              color: statusColor,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          if (hasEnoughData)
+                            Text.rich(
+                              TextSpan(
+                                children: [
+                                  TextSpan(
+                                    text: "Stock: ${agg.totalQuantity} ",
+                                  ),
+                                  TextSpan(
+                                    text: "(+ 1 in use)",
+                                    style: TextStyle(
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.primary,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              style: TextStyle(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                                fontSize: 11,
+                              ),
+                            )
+                          else
+                            Text(
+                              "Stock: ${agg.totalQuantity}",
+                              style: TextStyle(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                                fontSize: 11,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        );
+      },
+    );
+  }
+
+  Widget _buildConsumptionGrid(
+    BuildContext context,
+    List<ConsumptionData> list,
+  ) {
+    if (list.isEmpty) return const SizedBox();
+
+    list.sort((a, b) {
+      if (a.hasEnoughData && !b.hasEnoughData) return -1;
+      if (!a.hasEnoughData && b.hasEnoughData) return 1;
+      if (a.hasEnoughData && b.hasEnoughData) {
+        return a.daysUntilRunout.compareTo(b.daysUntilRunout);
+      }
+      return a.itemName.compareTo(b.itemName);
+    });
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        int columns = 1;
+        if (constraints.maxWidth > 900)
+          columns = 3;
+        else if (constraints.maxWidth > 600)
+          columns = 2;
+
+        double spacing = 10.0;
+        double itemWidth =
+            (constraints.maxWidth - (spacing * (columns - 1))) / columns;
+
+        return Wrap(
+          spacing: spacing,
+          runSpacing: spacing,
+          children: list.map((cData) {
+            Color statusColor;
+            String bigText;
+            String subText;
+
+            if (cData.hasEnoughData) {
+              if (cData.daysUntilRunout < 0) {
+                statusColor = Colors.redAccent;
+                bigText = "Due";
+                subText = "Overdue";
+              } else if (cData.daysUntilRunout < 7) {
+                statusColor = Colors.redAccent;
+                bigText = "${cData.daysUntilRunout}";
+                subText = "Days";
+              } else if (cData.daysUntilRunout < 30) {
+                statusColor = Colors.orangeAccent;
+                bigText = "${cData.daysUntilRunout}";
+                subText = "Days";
+              } else {
+                statusColor = Theme.of(context).colorScheme.primary;
+                bigText = "${cData.daysUntilRunout}";
+                subText = "Days";
+              }
+            } else {
+              statusColor = Theme.of(
+                context,
+              ).colorScheme.onSurfaceVariant.withOpacity(0.3);
+              bigText = "?";
+              subText = "N/A";
+            }
+
+            return SizedBox(
+              width: itemWidth,
+              child: Material(
+                color: Colors.transparent,
+                borderRadius: BorderRadius.circular(12),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => ItemGraphPage(
+                          itemName: cData.itemName,
+                          usageHistory: cData.history,
+                        ),
+                      ),
+                    );
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).cardColor.withOpacity(0.5),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Theme.of(context).dividerColor),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 40,
+                          height: 40,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(color: statusColor, width: 2),
+                            color: statusColor.withOpacity(0.1),
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text(
+                                bigText,
+                                style: TextStyle(
+                                  color: statusColor,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              if (subText != "N/A")
+                                Text(
+                                  subText,
+                                  style: TextStyle(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                    fontSize: 7,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                cData.itemName,
+                                style: TextStyle(
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.onSurface,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 2),
+                              if (cData.hasEnoughData) ...[
+                                Text(
+                                  "Rate: 1 every ${cData.avgDaysPerUse.toStringAsFixed(1)} days",
+                                  style: TextStyle(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                                if (cData.projectedDate != null)
+                                  Text(
+                                    "Empty: ${_formatSimpleDate(cData.projectedDate!)}",
+                                    style: TextStyle(
+                                      color: statusColor,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                              ] else
+                                Text(
+                                  "Needs 2+ usages (Used ${cData.usageCount})",
+                                  style: TextStyle(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                    fontSize: 10,
+                                    fontStyle: FontStyle.italic,
+                                  ),
+                                ),
+
+                              // FIX: Force "+ 1 in use" display when data is available
+                              if (cData.hasEnoughData)
+                                Text.rich(
+                                  TextSpan(
+                                    children: [
+                                      TextSpan(
+                                        text:
+                                            "Stock: ${cData.currentQuantity} ",
+                                      ),
+                                      TextSpan(
+                                        text: "(+ 1 in use)",
+                                        style: TextStyle(
+                                          color: Theme.of(
+                                            context,
+                                          ).colorScheme.primary,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  style: TextStyle(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                    fontSize: 10,
+                                  ),
+                                )
+                              else
+                                Text(
+                                  "Stock: ${cData.currentQuantity}",
+                                  style: TextStyle(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                    fontSize: 10,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        );
+      },
+    );
+  }
 }
 
+// ... (Keep ItemGraphPage and GraphTimelinePainter as is)
 class ItemGraphPage extends StatelessWidget {
   final String itemName;
   final List<DateTime> usageHistory;
@@ -706,7 +898,6 @@ class ItemGraphPage extends StatelessWidget {
     final isLandscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
 
-    // Sort oldest to newest for the graph
     final sortedData = List<DateTime>.from(usageHistory)..sort();
 
     return Scaffold(
@@ -778,7 +969,7 @@ class GraphTimelinePainter extends CustomPainter {
     final Paint borderPaint = Paint()
       ..color = textColor.withOpacity(0.1)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 10; // Halo effect
+      ..strokeWidth = 10;
 
     final textStyle = TextStyle(
       color: textColor,
@@ -795,7 +986,6 @@ class GraphTimelinePainter extends CustomPainter {
         ? size.width / (dates.length)
         : size.height / (dates.length);
 
-    // Adjust spacing if too cramped
     if (step < 80) step = 80;
 
     for (int i = 0; i < dates.length; i++) {
@@ -804,7 +994,6 @@ class GraphTimelinePainter extends CustomPainter {
           ? Offset(progress + 40, size.height / 2)
           : Offset(size.width / 2, progress + 40);
 
-      // Draw connecting line to next point
       if (i < dates.length - 1) {
         final double nextProgress = (i + 1) * step;
         final Offset nextCenter = isHorizontal
@@ -813,14 +1002,13 @@ class GraphTimelinePainter extends CustomPainter {
 
         canvas.drawLine(center, nextCenter, linePaint);
 
-        // Draw Gap Label (Days elapsed)
         final int daysDiff = dates[i + 1].difference(dates[i]).inDays;
         final String gapText = "$daysDiff days";
 
         final TextSpan span = TextSpan(text: gapText, style: subTextStyle);
         final TextPainter tp = TextPainter(
           text: span,
-          textDirection: ui.TextDirection.ltr, // FIXED: Explicit usage
+          textDirection: ui.TextDirection.ltr,
         );
         tp.layout();
 
@@ -829,7 +1017,6 @@ class GraphTimelinePainter extends CustomPainter {
           (center.dy + nextCenter.dy) / 2,
         );
 
-        // Offset text slightly above/right of the line center
         final Offset textOffset = isHorizontal
             ? Offset(midPoint.dx - (tp.width / 2), midPoint.dy - 20)
             : Offset(midPoint.dx + 15, midPoint.dy - (tp.height / 2));
@@ -837,17 +1024,14 @@ class GraphTimelinePainter extends CustomPainter {
         tp.paint(canvas, textOffset);
       }
 
-      // Draw Dot Halo
       canvas.drawCircle(center, 8, borderPaint);
-      // Draw Dot
       canvas.drawCircle(center, 5, dotPaint);
 
-      // Draw Date Label
       final String dateText = DateFormat('MMM d').format(dates[i]);
       final TextSpan dSpan = TextSpan(text: dateText, style: textStyle);
       final TextPainter dTp = TextPainter(
         text: dSpan,
-        textDirection: ui.TextDirection.ltr, // FIXED: Explicit usage
+        textDirection: ui.TextDirection.ltr,
       );
       dTp.layout();
 

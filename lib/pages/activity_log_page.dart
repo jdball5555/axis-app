@@ -39,7 +39,6 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
   }
 
   // --- HELPER: Clean Name for Display ---
-  // If ID is "Soap_Bathroom", return "Soap".
   String _getDisplayName(String id) {
     if (id.contains('_')) {
       return id.split('_').first;
@@ -64,7 +63,8 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
 
   void _showEditDialog(Map<String, dynamic> log) {
     final String docId = log['id'];
-    final String currentNote = log['note'] ?? '';
+    // Check 'notes' first (new standard), fallback to 'note' (old standard)
+    final String currentNote = log['notes'] ?? log['note'] ?? '';
     DateTime selectedDate = _parseTimestamp(log['timestamp']) ?? DateTime.now();
     TextEditingController noteController = TextEditingController(
       text: currentNote,
@@ -131,10 +131,11 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                       color: Theme.of(context).colorScheme.onSurface,
                     ),
                     decoration: InputDecoration(
-                      labelText: "Note",
+                      labelText: "Notes (Column G)",
                       border: const OutlineInputBorder(),
                       suffixIcon: IconButton(
                         icon: const Icon(Icons.access_time, size: 16),
+                        tooltip: "Mark as Approximate",
                         onPressed: () {
                           String text = noteController.text;
                           if (text.isNotEmpty) text += " ";
@@ -166,7 +167,7 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
                   onPressed: () {
                     _db.updateLogEntry(docId, {
                       'timestamp': selectedDate.toIso8601String(),
-                      'note': noteController.text.trim(),
+                      'notes': noteController.text.trim(), // Key matches Export
                     });
                     Navigator.pop(ctx);
                   },
@@ -265,7 +266,8 @@ class _ActivityLogPageState extends State<ActivityLogPage> {
               final String action = log['action'] ?? 'UNKNOWN';
               final String item = log['item'] ?? 'Unknown Item';
               final String room = log['room'] ?? 'N/A';
-              final String note = log['note'] ?? '';
+              // Fallback for legacy 'note' key
+              final String note = log['notes'] ?? log['note'] ?? '';
               final int change = (log['change'] as num?)?.toInt() ?? 0;
               final int total = (log['total'] as num?)?.toInt() ?? 0;
 

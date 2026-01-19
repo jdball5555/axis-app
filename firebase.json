@@ -1,1 +1,55 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"project-axis-app","appId":"1:290026173104:android:5bfc2cf1a4550a69f18175","fileOutput":"android/app/google-services.json"}},"ios":{"default":{"projectId":"project-axis-app","appId":"1:290026173104:ios:e70b8754e7ae4fa8f18175","uploadDebugSymbols":false,"fileOutput":"ios/Runner/GoogleService-Info.plist"}},"macos":{"default":{"projectId":"project-axis-app","appId":"1:290026173104:ios:e70b8754e7ae4fa8f18175","uploadDebugSymbols":false,"fileOutput":"macos/Runner/GoogleService-Info.plist"}},"dart":{"lib/firebase_options.dart":{"projectId":"project-axis-app","configurations":{"android":"1:290026173104:android:5bfc2cf1a4550a69f18175","ios":"1:290026173104:ios:e70b8754e7ae4fa8f18175","macos":"1:290026173104:ios:e70b8754e7ae4fa8f18175","web":"1:290026173104:web:3f047ca5d3782092f18175","windows":"1:290026173104:web:0abee706b31efddff18175"}}}}}}
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "project-axis-app",
+          "appId": "1:290026173104:android:5bfc2cf1a4550a69f18175",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "ios": {
+        "default": {
+          "projectId": "project-axis-app",
+          "appId": "1:290026173104:ios:e70b8754e7ae4fa8f18175",
+          "uploadDebugSymbols": false,
+          "fileOutput": "ios/Runner/GoogleService-Info.plist"
+        }
+      },
+      "macos": {
+        "default": {
+          "projectId": "project-axis-app",
+          "appId": "1:290026173104:ios:e70b8754e7ae4fa8f18175",
+          "uploadDebugSymbols": false,
+          "fileOutput": "macos/Runner/GoogleService-Info.plist"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "project-axis-app",
+          "configurations": {
+            "android": "1:290026173104:android:5bfc2cf1a4550a69f18175",
+            "ios": "1:290026173104:ios:e70b8754e7ae4fa8f18175",
+            "macos": "1:290026173104:ios:e70b8754e7ae4fa8f18175",
+            "web": "1:290026173104:web:3f047ca5d3782092f18175",
+            "windows": "1:290026173104:web:0abee706b31efddff18175"
+          }
+        }
+      }
+    }
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "disallowLegacyRuntimeConfig": true,
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ]
+    }
+  ]
+}

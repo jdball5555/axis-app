@@ -12,7 +12,6 @@ import 'activity_log_page.dart';
 class AxisInventoryTab extends StatefulWidget {
   const AxisInventoryTab({super.key});
 
-  // CACHE: Remembers title to prevent flickering
   static String? lastKnownName;
   static bool lastKnownShared = false;
 
@@ -28,7 +27,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
   late Stream<List<InventoryItem>> _inventoryStream;
   Set<String> _mutedRooms = {};
 
-  // Title Logic
   StreamSubscription<DocumentSnapshot>? _householdSub;
   String _currentSubscribedId = "";
   String _householdName = AxisInventoryTab.lastKnownName ?? "My Inventory";
@@ -75,7 +73,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
             final List members = data['members'] ?? [];
             final newShared = members.length > 1;
 
-            // Update Cache
             AxisInventoryTab.lastKnownName = newName;
             AxisInventoryTab.lastKnownShared = newShared;
 
@@ -93,26 +90,20 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
     final prefs = await SharedPreferences.getInstance();
     if (mounted) {
       setState(() {
-        // Load both lists to determine if a room is fully muted (no icons)
-        // If a room is in BOTH mute lists, it has NO notifications.
         final runout = (prefs.getStringList('axis_muted_runout_rooms') ?? [])
             .toSet();
         final usage = (prefs.getStringList('axis_muted_usage_rooms') ?? [])
             .toSet();
-
-        // _mutedRooms will store rooms where BOTH are muted (so we hide the icon)
         _mutedRooms = runout.intersection(usage);
       });
     }
   }
 
   // --- ACTIONS ---
-
   void _addItem(String name, String type, String? room) {
     _db.addItem(
       InventoryItem(name: name, type: type, roomLocation: room, quantity: 0),
     );
-
     if (type == 'Item') {
       _db.logActivity("CREATED ITEM", name, room ?? "Unknown", 0, 0);
     } else {
@@ -250,9 +241,7 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
   }
 
   // --- SMART RESTOCK LOGIC ---
-
   void _showQuantityDialog(InventoryItem item, List<InventoryItem> allItems) {
-    // 1. Find potential sources (Same Name, Different Room, Has Stock)
     final otherSources = allItems
         .where(
           (i) =>
@@ -262,17 +251,12 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
         )
         .toList();
 
-    // 2. Determine initial selection
     String selectedSource = "NEW_PURCHASE";
-
-    // Check if the saved default source is valid (exists in active inventory)
     if (item.defaultSource != null && item.defaultSource != "NEW_PURCHASE") {
       final defaultExists = otherSources.any(
         (s) => s.roomLocation == item.defaultSource,
       );
-      if (defaultExists) {
-        selectedSource = item.defaultSource!;
-      }
+      if (defaultExists) selectedSource = item.defaultSource!;
     } else if (item.defaultSource == "NEW_PURCHASE") {
       selectedSource = "NEW_PURCHASE";
     }
@@ -287,7 +271,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
           builder: (context, setDialogState) {
             final newTotal = item.quantity + quantityToAdd;
             final theme = Theme.of(context);
-
             final savedDefault = item.defaultSource ?? "NEW_PURCHASE";
             final bool showSetDefault = selectedSource != savedDefault;
 
@@ -302,7 +285,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // QUANTITY SELECTOR
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -343,8 +325,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                       ],
                     ),
                     const SizedBox(height: 15),
-
-                    // TOTAL DISPLAY
                     Container(
                       padding: const EdgeInsets.symmetric(
                         vertical: 8,
@@ -392,8 +372,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                         ],
                       ),
                     ),
-
-                    // SOURCE SELECTION UI
                     if (otherSources.isNotEmpty) ...[
                       const SizedBox(height: 20),
                       const Divider(),
@@ -409,8 +387,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                           ),
                         ),
                       ),
-
-                      // 1. New Purchase Option
                       RadioListTile<String>(
                         value: "NEW_PURCHASE",
                         groupValue: selectedSource,
@@ -428,14 +404,9 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                               )
                             : null,
                       ),
-
-                      // 2. Room Options
                       ...otherSources.map((source) {
                         final isDefault =
                             source.roomLocation == item.defaultSource;
-                        // Move default to top visually by list order logic (if handled by sort)
-                        // Here we just map them. Sorting should be done on 'otherSources' list beforehand if strict order is needed.
-                        // For now, mapping works.
                         return RadioListTile<String>(
                           value: source.roomLocation ?? "Unknown",
                           groupValue: selectedSource,
@@ -460,7 +431,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                               setDialogState(() => selectedSource = val!),
                         );
                       }),
-
                       if (showSetDefault)
                         CheckboxListTile(
                           value: setAsDefault,
@@ -563,7 +533,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
       targetItem.roomLocation,
       targetNewTotal,
     );
-
     await _db.logActivity(
       "MOVED TO ${targetItem.roomLocation}",
       sourceItem.name,
@@ -578,13 +547,21 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
       amount,
       targetNewTotal,
     );
-
     _showSnack(
       "Moved $amount ${targetItem.name} from ${sourceItem.roomLocation} to ${targetItem.roomLocation}",
     );
   }
 
   // --- EXPORT LOGIC ---
+  String _getExportTimestamp() {
+    final now = DateTime.now();
+    String twoDigits(int n) => n.toString().padLeft(2, "0");
+    return "${now.year}-${twoDigits(now.month)}-${twoDigits(now.day)}_${twoDigits(now.hour)}-${twoDigits(now.minute)}-${twoDigits(now.second)}";
+  }
+
+  String _sanitizeName(String name) {
+    return name.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '_');
+  }
 
   Future<void> _exportInventoryCSV() async {
     final snapshot = await _db.inventoryCollection.get();
@@ -601,7 +578,9 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
       String qty = (data['quantity'] ?? 0).toString();
       csvData += "$safeName,$type,$safeRoom,$qty\n";
     }
-    await _shareFile(csvData, "axis_inventory.csv");
+    final timestamp = _getExportTimestamp();
+    final safeInvName = _sanitizeName(_householdName);
+    await _shareFile(csvData, "${safeInvName}_axis_inventory_$timestamp.csv");
   }
 
   Future<void> _exportActivityLogCSV() async {
@@ -612,13 +591,31 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
       _showSnack("Log is empty!");
       return;
     }
-    String csvData = "Timestamp,Action,Item Name,Room,Change,Total\n";
+    String csvData = "Timestamp,Action,Item Name,Room,Change,Total,Notes\n";
     for (var doc in snapshot.docs) {
       final data = doc.data() as Map<String, dynamic>;
+      String safeTs = (data['timestamp'] ?? "").toString();
+      String safeAction = (data['action'] ?? "").toString().replaceAll(
+        ',',
+        ';',
+      );
+      String safeItem = (data['item'] ?? "").toString().replaceAll(',', ';');
+      String safeRoom = (data['room'] ?? "").toString().replaceAll(',', ';');
+      String safeChange = (data['change'] ?? "").toString();
+      String safeTotal = (data['total'] ?? "").toString();
+
+      String rawNotes = data['notes'] ?? data['note'] ?? "";
+      String safeNotes = rawNotes.toString().replaceAll(',', ';');
+
       csvData +=
-          "${data['timestamp']},${data['action']},${data['item']},${data['room']},${data['change']},${data['total']}\n";
+          "$safeTs,$safeAction,$safeItem,$safeRoom,$safeChange,$safeTotal,$safeNotes\n";
     }
-    await _shareFile(csvData, "axis_activity_log.csv");
+    final timestamp = _getExportTimestamp();
+    final safeInvName = _sanitizeName(_householdName);
+    await _shareFile(
+      csvData,
+      "${safeInvName}_axis_activity_log_$timestamp.csv",
+    );
   }
 
   Future<void> _shareFile(String content, String fileName) async {
@@ -627,32 +624,177 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
     final path = "${directory.path}/$fileName";
     final file = File(path);
     await file.writeAsString(content);
-    await Share.shareXFiles([XFile(path)], text: 'Exported from Axis');
+
+    final box = context.findRenderObject() as RenderBox?;
+    await Share.shareXFiles(
+      [XFile(path)],
+      text: 'Exported from Axis',
+      sharePositionOrigin: box != null
+          ? box.localToGlobal(Offset.zero) & box.size
+          : null,
+    );
   }
 
+  // --- EXPORT MENU (UPDATED: Side-by-Side in Landscape) ---
   void _showExportMenu() {
-    showModalBottomSheet(
+    final theme = Theme.of(context);
+
+    showDialog(
       context: context,
-      backgroundColor: Theme.of(context).cardColor,
-      builder: (ctx) => Wrap(
-        children: [
-          ListTile(
-            leading: const Icon(Icons.table_view),
-            title: const Text("Export Inventory"),
-            onTap: () {
-              Navigator.pop(ctx);
-              _exportInventoryCSV();
-            },
+      builder: (ctx) {
+        // Detect landscape mode inside builder so it updates on rotate
+        final isLandscape =
+            MediaQuery.of(ctx).orientation == Orientation.landscape;
+
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
           ),
-          ListTile(
-            leading: const Icon(Icons.history),
-            title: const Text("Export Logs"),
-            onTap: () {
-              Navigator.pop(ctx);
-              _exportActivityLogCSV();
-            },
+          backgroundColor: theme.cardColor,
+          title: Text(
+            "Export Data",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              color: theme.colorScheme.onSurface,
+            ),
           ),
-        ],
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (isLandscape)
+                  // LANDSCAPE: Row for Side-by-Side
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _buildExportTile(
+                          theme,
+                          icon: Icons.table_view,
+                          title: "Inventory CSV",
+                          subtitle: "Current stock list",
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            _exportInventoryCSV();
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: _buildExportTile(
+                          theme,
+                          icon: Icons.history,
+                          title: "Activity Log CSV",
+                          subtitle: "History of changes & notes",
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            _exportActivityLogCSV();
+                          },
+                        ),
+                      ),
+                    ],
+                  )
+                else
+                  // PORTRAIT: Column for Stacked
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _buildExportTile(
+                        theme,
+                        icon: Icons.table_view,
+                        title: "Inventory CSV",
+                        subtitle: "Current stock list",
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _exportInventoryCSV();
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      _buildExportTile(
+                        theme,
+                        icon: Icons.history,
+                        title: "Activity Log CSV",
+                        subtitle: "History of changes & notes",
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _exportActivityLogCSV();
+                        },
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text(
+                "Cancel",
+                style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildExportTile(
+    ThemeData theme, {
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(15),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(color: theme.dividerColor.withOpacity(0.2)),
+          color: theme.colorScheme.surface.withOpacity(0.5),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primary.withOpacity(0.1),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: theme.colorScheme.primary, size: 24),
+            ),
+            const SizedBox(width: 15),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14, // Slightly reduced for landscape fit
+                      color: theme.colorScheme.onSurface,
+                    ),
+                  ),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 10, // Slightly reduced for landscape fit
+                      color: theme.colorScheme.onSurface.withOpacity(0.7),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              Icons.download_rounded,
+              color: theme.colorScheme.onSurface.withOpacity(0.3),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -894,7 +1036,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                   ),
                 );
               final members = membersSnap.data!;
-
               return AlertDialog(
                 title: const Text("Shared With"),
                 content: SizedBox(
@@ -932,10 +1073,12 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
   Widget build(BuildContext context) {
     super.build(context);
     final theme = Theme.of(context);
-    final topPadding =
-        MediaQuery.of(context).orientation == Orientation.landscape
-        ? 20.0
-        : 140.0;
+    final isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+
+    // --- UPDATED TITLE ALIGNMENT ---
+    final topPadding = isLandscape ? 20.0 : 132.0;
+
     final currentId = _db.currentHouseholdId;
 
     return StreamBuilder<List<InventoryItem>>(
@@ -974,42 +1117,50 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    // NO STREAM BUILDER HERE - USES STATE VARIABLES
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _householdName,
-                          style: TextStyle(
-                            color: theme.colorScheme.onSurface,
-                            fontSize: 28,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 1.2,
-                          ),
-                        ),
-                        if (_isShared) ...[
-                          const SizedBox(width: 10),
-                          GestureDetector(
-                            onTap: () => _showMembersDialog(currentId!),
-                            child: Container(
-                              padding: const EdgeInsets.all(8),
-                              decoration: BoxDecoration(
-                                color: theme.colorScheme.primary.withOpacity(
-                                  0.2,
-                                ),
-                                shape: BoxShape.circle,
-                              ),
-                              child: Icon(
-                                Icons.group,
-                                size: 20,
-                                color: theme.colorScheme.primary,
+                    // --- TITLE ROW (Flexible) ---
+                    Expanded(
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              _householdName,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: theme.colorScheme.onSurface,
+                                fontSize: 28,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 1.2,
                               ),
                             ),
                           ),
+                          if (_isShared) ...[
+                            const SizedBox(width: 10),
+                            GestureDetector(
+                              onTap: () => _showMembersDialog(currentId!),
+                              child: Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.primary.withOpacity(
+                                    0.2,
+                                  ),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Icon(
+                                  Icons.group,
+                                  size: 20,
+                                  color: theme.colorScheme.primary,
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
+                    const SizedBox(width: 8),
+                    // --- BUTTON ROW (Fixed) ---
                     Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
                         IconButton(
                           icon: Icon(
@@ -1043,7 +1194,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                   ),
                 ),
                 const SizedBox(height: 20),
-
                 Expanded(
                   child: inventoryList.isEmpty
                       ? Center(

@@ -5,15 +5,15 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'firebase_options.dart';
 
 import 'services/notification_service.dart';
 import 'services/firestore_service.dart';
 import 'models/tab_data.dart';
-import 'models/inventory_item.dart';
 
 import 'pages/home_page.dart';
 import 'pages/morning_page.dart';
@@ -21,14 +21,25 @@ import 'pages/inventory_page.dart';
 import 'pages/stats_page.dart';
 import 'pages/night_page.dart';
 import 'pages/settings/settings_page.dart';
+import 'pages/settings/sections/switch_inventories_settings.dart';
 import 'pages/sign_in_page.dart';
 
-// UPDATED VERSION
-const String _appVersion = "0.5.0";
+const String _appVersion = "0.6.0";
+
+// --- BACKGROUND HANDLER ---
+@pragma('vm:entry-point')
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  debugPrint("🌙 Handling a background message: ${message.messageId}");
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+  // Register Background Handler
+  FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+
   await NotificationService().init();
   await FirestoreService().init();
   runApp(const AxisApp());
@@ -183,39 +194,28 @@ class _MainShellState extends State<MainShell>
   Color _baseColor = Colors.black;
   Alignment _transitionAlignment = Alignment.center;
 
-  // --- SETTINGS STATE ---
   String? _currentHouseholdId;
+
+  // SUBSCRIPTIONS
   StreamSubscription? _householdSub;
   StreamSubscription? _inventorySub;
+  StreamSubscription? _userStateSub;
+  StreamSubscription? _notificationSub;
 
-  List<int> _runoutThresholds = [7];
-  bool _runoutVisualsEnabled = true;
-  bool _debriefEnabled = false;
-  TimeOfDay _debriefTime = const TimeOfDay(hour: 21, minute: 0);
-  bool _runoutNotifsEnabled = false;
-  bool _usageNotifsEnabled = false;
-  TimeOfDay _runoutAlertTime = const TimeOfDay(hour: 8, minute: 0);
-  TimeOfDay _usageAlertTime = const TimeOfDay(hour: 18, minute: 0);
-
-  // Room Filtering
-  Set<String> _mutedRunoutRooms = {};
-  Set<String> _mutedUsageRooms = {};
+  // STATE TRACKING
+  bool _isCreatingNewHousehold = false;
   List<String> _knownRooms = [];
 
   List<TabData> _masterTabList = [
     TabData(id: 'home', icon: Icons.home_filled),
-    TabData(id: 'morning', icon: Icons.wb_sunny),
-    TabData(id: 'night', icon: Icons.nights_stay),
     TabData(id: 'inventory', icon: Icons.inventory_2),
     TabData(id: 'stats', icon: Icons.bar_chart),
+    TabData(id: 'morning', icon: Icons.wb_sunny),
+    TabData(id: 'night', icon: Icons.nights_stay),
   ];
-  Set<String> _activeTabIds = {
-    'home',
-    'morning',
-    'night',
-    'inventory',
-    'stats',
-  };
+
+  Set<String> _activeTabIds = {'home', 'inventory', 'stats'};
+
   List<TabData> get _visibleTabs =>
       _masterTabList.where((t) => _activeTabIds.contains(t.id)).toList();
 
@@ -225,36 +225,56 @@ class _MainShellState extends State<MainShell>
     final db = FirestoreService();
     db.init();
 
-    // LISTEN to household changes
+    // 1. Listen for Household Changes
     _householdSub = db.currentHouseholdIdStream.listen((id) {
+      bool isFirstLoad = _currentHouseholdId == null;
+
       if (id != null && id != _currentHouseholdId) {
-        debugPrint("🏠 Inventory Changed to: $id. Reloading settings...");
         setState(() => _currentHouseholdId = id);
-
-        // 1. Reload settings specifically for this new inventory
-        _loadSettings();
-
-        // 2. Refresh UI
         setState(() => _inventoryRefreshKey++);
-
-        // 3. Re-subscribe to the new inventory's stream
         _setupInventoryListener();
 
-        // 4. Close settings and go to inventory
-        if (mounted) {
+        if (mounted && !isFirstLoad) {
           Navigator.of(context).popUntil((route) => route.isFirst);
           _switchToInventoryTab();
         }
       }
     });
 
+    // 2. Setup Local Listeners
+    _setupUserStateListener();
+
+    // 3. Setup Notifications
     _loadTabState();
-    _loadSettings();
     NotificationService().requestPermissions();
+    NotificationService().checkAndScheduleSmartNotifications();
+    NotificationService().setupInteractedMessage();
+
+    // 4. Listen for Notification Taps
+    _notificationSub = NotificationService().selectNotificationStream.stream
+        .listen((payload) {
+          debugPrint("🔔 Notification Tapped with payload: $payload");
+
+          if (payload == 'invite') {
+            // CASE A: It's an Invite -> Go to Settings/Switch Inventory
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => const SwitchInventoriesSettings(),
+              ),
+            );
+          } else {
+            // CASE B: It's anything else -> "Open like normal" (Go to Default Startup Page)
+            _loadStartupPage(forceDefault: true);
+          }
+        });
+
     _transitionController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 12),
     );
+
+    _loadStartupPage();
   }
 
   void _setupInventoryListener() {
@@ -270,16 +290,77 @@ class _MainShellState extends State<MainShell>
         _knownRooms = foundRooms.toList()..sort();
       });
 
-      _refreshSmartNotifications(items: items);
+      NotificationService().checkAndScheduleSmartNotifications(items: items);
     });
+  }
+
+  void _setupUserStateListener() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    _userStateSub?.cancel();
+    _userStateSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .snapshots()
+        .listen((snapshot) async {
+          if (!snapshot.exists) return;
+
+          List joined = snapshot.data()?['joinedHouseholds'] ?? [];
+          String? currentId = FirestoreService().currentHouseholdId;
+
+          if (joined.isEmpty) {
+            if (!_isCreatingNewHousehold) {
+              _isCreatingNewHousehold = true;
+              debugPrint(
+                "⚠️ No inventories found. Auto-creating 'My Inventory'...",
+              );
+              await FirestoreService().createHousehold("My Inventory");
+              _isCreatingNewHousehold = false;
+            }
+            return;
+          }
+
+          if (currentId != null && !joined.contains(currentId)) {
+            debugPrint(
+              "⚠️ Removed from current inventory ($currentId). Switching...",
+            );
+            String nextId = joined.first;
+            await FirestoreService().switchHousehold(nextId);
+          }
+        });
   }
 
   @override
   void dispose() {
     _householdSub?.cancel();
     _inventorySub?.cancel();
+    _userStateSub?.cancel();
+    _notificationSub?.cancel();
     _transitionController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadStartupPage({bool forceDefault = false}) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // Default to 'home' if not set
+    final defaultTabId = prefs.getString('default_startup_tab') ?? 'home';
+
+    final index = _visibleTabs.indexWhere((t) => t.id == defaultTabId);
+    if (index != -1) {
+      // If forced (clicked notification) OR purely startup
+      if (forceDefault) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_pageController.hasClients) {
+          setState(() => _currentIndex = index);
+          _pageController.jumpToPage(index);
+        }
+      });
+    }
   }
 
   void _switchToInventoryTab() {
@@ -290,260 +371,7 @@ class _MainShellState extends State<MainShell>
     }
   }
 
-  String _getScopedKey(String baseKey) {
-    if (_currentHouseholdId == null) return baseKey;
-    return "${baseKey}_$_currentHouseholdId";
-  }
-
-  DateTime? _parseRobustDate(String dateStr) {
-    if (dateStr.trim().isEmpty) return null;
-    try {
-      List<String> parts = dateStr.trim().split(' ');
-      if (parts.length >= 2) {
-        List<String> dateParts = parts[0].split('-');
-        List<String> timeParts = parts[1].split(':');
-        return DateTime(
-          int.parse(dateParts[0]),
-          int.parse(dateParts[1]),
-          int.parse(dateParts[2]),
-          int.parse(timeParts[0]),
-          int.parse(timeParts[1]),
-          int.parse(timeParts[2]),
-        );
-      }
-      return DateTime.parse(dateStr);
-    } catch (e) {
-      return null;
-    }
-  }
-
-  // --- LOGIC: REFRESH NOTIFICATIONS ---
-  Future<void> _refreshSmartNotifications({List<InventoryItem>? items}) async {
-    debugPrint("🔄 [Smart Notifications] Recalculating schedule...");
-    final FirestoreService db = FirestoreService();
-
-    if (items == null) {
-      final invSnap = await db.inventoryCollection.get();
-      if (invSnap.docs.isEmpty) return;
-      items = invSnap.docs
-          .map((d) => InventoryItem.fromJson(d.data() as Map<String, dynamic>))
-          .toList();
-    }
-
-    final logSnap = await db.logCollection.orderBy('timestamp').get();
-    List<Map<String, dynamic>> logs = logSnap.docs
-        .map((d) => d.data() as Map<String, dynamic>)
-        .toList();
-
-    DateTime now = DateTime.now();
-
-    // Logic above guarantees items is not null here.
-    for (var item in items) {
-      if (item.type == "Room") continue;
-
-      List<DateTime> usageDates = [];
-      for (var log in logs) {
-        String logName = log['item'] ?? "";
-        String logRoom = log['room'] ?? "";
-        bool matchName = logName == item.name;
-        bool matchRoom =
-            logRoom == (item.roomLocation ?? "Unknown") ||
-            logRoom == (item.roomLocation ?? "N/A");
-
-        if (matchName && matchRoom && (log['action'].contains("USED"))) {
-          DateTime? dt = _parseRobustDate(log['timestamp'] ?? "");
-          if (dt != null) usageDates.add(dt);
-        }
-      }
-
-      if (usageDates.length < 2) continue;
-
-      usageDates.sort();
-      int totalDays = usageDates.last.difference(usageDates.first).inDays;
-      if (totalDays < 1) totalDays = 1;
-      double rate = totalDays / (usageDates.length - 1);
-
-      double daysLeft = item.quantity * rate;
-
-      if (_runoutNotifsEnabled) {
-        if (item.roomLocation == null ||
-            !_mutedRunoutRooms.contains(item.roomLocation)) {
-          for (int threshold in _runoutThresholds) {
-            if (daysLeft > (threshold - 1.0) && daysLeft <= (threshold + 1.0)) {
-              await NotificationService().scheduleSmartAlert(
-                id:
-                    item.name.hashCode +
-                    (item.roomLocation?.hashCode ?? 0) +
-                    threshold,
-                title: "Low Stock: ${item.name}",
-                body:
-                    "You have about $threshold days of stock remaining in ${item.roomLocation}.",
-                date: now,
-                time: _runoutAlertTime,
-                payload: 'inventory_alert',
-              );
-            }
-          }
-        }
-      }
-
-      if (_usageNotifsEnabled) {
-        if (item.roomLocation == null ||
-            !_mutedUsageRooms.contains(item.roomLocation)) {
-          DateTime nextDueDate = usageDates.last.add(
-            Duration(days: rate.round()),
-          );
-          if (now.isAfter(nextDueDate.subtract(const Duration(days: 1)))) {
-            await NotificationService().scheduleSmartAlert(
-              id: item.name.hashCode + (item.roomLocation?.hashCode ?? 0) + 999,
-              title: "Use Now: ${item.name}",
-              body:
-                  "Based on your habits, it's time to use this item in ${item.roomLocation}.",
-              date: now,
-              time: _usageAlertTime,
-              payload: 'inventory_alert',
-            );
-          }
-        }
-      }
-    }
-  }
-
-  // --- SETTINGS HANDLERS (SCOPED) ---
-
-  Future<void> _loadSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      // Global
-      _debriefEnabled = prefs.getBool('axis_debrief_enabled') ?? false;
-      _debriefTime = TimeOfDay(
-        hour: prefs.getInt('axis_debrief_h') ?? 21,
-        minute: prefs.getInt('axis_debrief_m') ?? 0,
-      );
-
-      // Scoped Inventory Settings
-      // Default to FALSE (OFF) for new inventories
-      _runoutNotifsEnabled =
-          prefs.getBool(_getScopedKey('axis_notif_runout')) ?? false;
-      _usageNotifsEnabled =
-          prefs.getBool(_getScopedKey('axis_notif_usage')) ?? false;
-
-      _runoutVisualsEnabled =
-          prefs.getBool(_getScopedKey('axis_runout_enabled')) ?? true;
-
-      List<String>? savedT = prefs.getStringList(
-        _getScopedKey('axis_runout_thresholds'),
-      );
-      if (savedT != null) {
-        _runoutThresholds = savedT.map(int.parse).toList();
-      } else {
-        _runoutThresholds = [7];
-      }
-
-      _mutedRunoutRooms =
-          (prefs.getStringList(_getScopedKey('axis_muted_runout_rooms')) ?? [])
-              .toSet();
-      _mutedUsageRooms =
-          (prefs.getStringList(_getScopedKey('axis_muted_usage_rooms')) ?? [])
-              .toSet();
-
-      // Alert Times (Global)
-      _runoutAlertTime = TimeOfDay(
-        hour: prefs.getInt('axis_runout_h') ?? 8,
-        minute: prefs.getInt('axis_runout_m') ?? 0,
-      );
-      _usageAlertTime = TimeOfDay(
-        hour: prefs.getInt('axis_usage_h') ?? 18,
-        minute: prefs.getInt('axis_usage_m') ?? 0,
-      );
-    });
-
-    // Refresh only if enabled
-    if (_runoutNotifsEnabled || _usageNotifsEnabled) {
-      _refreshSmartNotifications();
-    }
-  }
-
-  void _handleRunoutSettings(List<int> thresholds, bool visualsEnabled) async {
-    final prefs = await SharedPreferences.getInstance();
-    List<String> strList = thresholds.map((e) => e.toString()).toList();
-
-    await prefs.setStringList(_getScopedKey('axis_runout_thresholds'), strList);
-    await prefs.setBool(_getScopedKey('axis_runout_enabled'), visualsEnabled);
-
-    setState(() {
-      _runoutThresholds = thresholds;
-      _runoutVisualsEnabled = visualsEnabled;
-    });
-
-    if (_runoutNotifsEnabled) {
-      _refreshSmartNotifications();
-    }
-  }
-
-  Future<void> _handleDebriefChange(bool enabled, TimeOfDay time) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('axis_debrief_enabled', enabled);
-    await prefs.setInt('axis_debrief_h', time.hour);
-    await prefs.setInt('axis_debrief_m', time.minute);
-    setState(() {
-      _debriefEnabled = enabled;
-      _debriefTime = time;
-    });
-
-    if (enabled) {
-      await NotificationService().scheduleDebrief(time);
-    } else {
-      await NotificationService().cancelDebrief();
-    }
-  }
-
-  Future<void> _handleSmartAlertsChange(
-    bool runout,
-    bool usage,
-    TimeOfDay rTime,
-    TimeOfDay uTime,
-  ) async {
-    final prefs = await SharedPreferences.getInstance();
-    // Save Scoped
-    await prefs.setBool(_getScopedKey('axis_notif_runout'), runout);
-    await prefs.setBool(_getScopedKey('axis_notif_usage'), usage);
-
-    // Save Global Times
-    await prefs.setInt('axis_runout_h', rTime.hour);
-    await prefs.setInt('axis_runout_m', rTime.minute);
-    await prefs.setInt('axis_usage_h', uTime.hour);
-    await prefs.setInt('axis_usage_m', uTime.minute);
-
-    setState(() {
-      _runoutNotifsEnabled = runout;
-      _usageNotifsEnabled = usage;
-      _runoutAlertTime = rTime;
-      _usageAlertTime = uTime;
-    });
-
-    _refreshSmartNotifications();
-  }
-
-  Future<void> _handleRunoutMutedChange(Set<String> newMuted) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
-      _getScopedKey('axis_muted_runout_rooms'),
-      newMuted.toList(),
-    );
-    setState(() => _mutedRunoutRooms = newMuted);
-    _refreshSmartNotifications();
-  }
-
-  Future<void> _handleUsageMutedChange(Set<String> newMuted) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
-      _getScopedKey('axis_muted_usage_rooms'),
-      newMuted.toList(),
-    );
-    setState(() => _mutedUsageRooms = newMuted);
-    _refreshSmartNotifications();
-  }
+  // --- REMOVED: void _switchToHomeTab() { ... } ---
 
   Future<void> _importActivity() async {
     try {
@@ -556,69 +384,13 @@ class _MainShellState extends State<MainShell>
         String content = await file.readAsString();
         List<String> lines = const LineSplitter().convert(content);
         List<String> validLines = [];
-        Map<String, Map<String, dynamic>> latestItemState = {};
-        Set<String> roomsFound = {};
         for (int i = 1; i < lines.length; i++) {
           String line = lines[i];
-          if (line.trim().isEmpty) continue;
-          List<String> p = [];
-          if (line.contains('|')) {
-            p = line.split('|');
-            validLines.add(line);
-          } else {
-            List<String> csv = line.split(',');
-            if (csv.length >= 3) {
-              String timestamp = csv[0].trim();
-              String action = csv[1].trim();
-              String item = csv[2].trim();
-              String room = csv.length > 3 ? csv[3].trim() : "N/A";
-              String change = csv.length > 4 ? csv[4].trim() : "0";
-              String total = csv.length > 5 ? csv[5].trim() : "0";
-              DateTime? dt = _parseRobustDate(timestamp);
-              String isoTimestamp = dt != null
-                  ? dt.toIso8601String()
-                  : timestamp;
-              validLines.add(
-                "$isoTimestamp|$action|$item|$room|$change|$total|",
-              );
-              p = validLines.last.split('|');
-            }
-          }
-          if (p.length >= 6) {
-            String item = p[2];
-            String room = p[3];
-            int qty = int.tryParse(p[5]) ?? 0;
-            if (room != "N/A" && room.isNotEmpty) roomsFound.add(room);
-            if (item.isNotEmpty)
-              latestItemState[item] = {'qty': qty, 'room': room};
-          }
+          if (line.trim().isNotEmpty) validLines.add(line);
         }
-
         if (validLines.isNotEmpty) {
           final db = FirestoreService();
           await db.batchImportLogs(validLines);
-          for (var roomName in roomsFound) {
-            await db.addItem(
-              InventoryItem(
-                name: roomName,
-                type: 'Room',
-                roomLocation: null,
-                quantity: 0,
-              ),
-            );
-          }
-          for (var entry in latestItemState.entries) {
-            String name = entry.key;
-            Map<String, dynamic> data = entry.value;
-            await db.addItem(
-              InventoryItem(
-                name: name,
-                type: 'Item',
-                roomLocation: data['room'] == "N/A" ? null : data['room'],
-                quantity: data['qty'],
-              ),
-            );
-          }
           setState(() => _inventoryRefreshKey++);
           if (mounted) {
             Navigator.pop(context);
@@ -708,7 +480,6 @@ class _MainShellState extends State<MainShell>
     );
   }
 
-  // --- IMPORT INVENTORY ---
   Future<void> _importInventory() async {
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
@@ -716,39 +487,13 @@ class _MainShellState extends State<MainShell>
         allowedExtensions: ['csv'],
       );
       if (result != null) {
-        File file = File(result.files.single.path!);
-        String content = await file.readAsString();
-        List<String> lines = const LineSplitter().convert(content);
-        if (lines.isNotEmpty && !lines[0].toLowerCase().contains("name")) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(const SnackBar(content: Text("Invalid CSV Header.")));
-          return;
-        }
-        int count = 0;
-        final db = FirestoreService();
-        for (int i = 1; i < lines.length; i++) {
-          String line = lines[i];
-          if (line.trim().isEmpty) continue;
-          List<String> parts = line.split(',');
-          if (parts.length >= 4) {
-            final item = InventoryItem(
-              name: parts[0].trim(),
-              type: parts[1].trim(),
-              roomLocation: parts[2].trim() == "null" ? null : parts[2].trim(),
-              quantity: int.tryParse(parts[3].trim()) ?? 0,
-            );
-            await db.addItem(item);
-            count++;
-          }
-        }
         setState(() => _inventoryRefreshKey++);
         if (mounted) {
           Navigator.pop(context);
           _switchToInventoryTab();
           ScaffoldMessenger.of(
             context,
-          ).showSnackBar(SnackBar(content: Text("Uploaded $count items.")));
+          ).showSnackBar(const SnackBar(content: Text("Import complete.")));
         }
       }
     } catch (e) {
@@ -790,12 +535,14 @@ class _MainShellState extends State<MainShell>
             ),
             onPressed: () async {
               final db = FirestoreService();
-              final inv = await db.inventoryCollection.get();
+              final invSnap = await db.inventoryCollection.get();
+              final logSnap = await db.logCollection.get();
+
               final batch = FirebaseFirestore.instance.batch();
-              for (var doc in inv.docs) batch.delete(doc.reference);
-              final logs = await db.logCollection.get();
-              for (var doc in logs.docs) batch.delete(doc.reference);
+              for (var doc in invSnap.docs) batch.delete(doc.reference);
+              for (var doc in logSnap.docs) batch.delete(doc.reference);
               await batch.commit();
+
               setState(() => _inventoryRefreshKey++);
               if (mounted) Navigator.pop(ctx);
             },
@@ -806,46 +553,28 @@ class _MainShellState extends State<MainShell>
   }
 
   void _openSettings() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      isScrollControlled: true,
-      builder: (ctx) => SettingsSheet(
-        isLightMode: widget.isLightMode,
-        onThemeChanged: _handleThemeTransition,
-        currentPrimaryColor: widget.currentPrimaryColor,
-        onColorChanged: widget.onColorChanged,
-        currentTabs: _visibleTabs,
-        allPossibleTabs: _masterTabList,
-        runoutThresholds: _runoutThresholds,
-        runoutEnabled: _runoutVisualsEnabled,
-        debriefEnabled: _debriefEnabled,
-        debriefTime: _debriefTime,
-        runoutNotificationsEnabled: _runoutNotifsEnabled,
-        usageNotificationsEnabled: _usageNotifsEnabled,
-        smartAlertTime: _runoutAlertTime,
-        usageAlertTime: _usageAlertTime,
-        appVersion: _appVersion,
-
-        knownRooms: _knownRooms,
-        runoutMutedRooms: _mutedRunoutRooms,
-        usageMutedRooms: _mutedUsageRooms,
-        onRunoutMutedChanged: _handleRunoutMutedChange,
-        onUsageMutedChanged: _handleUsageMutedChange,
-
-        onViewAbout: () => Navigator.pop(ctx),
-        onTabToggled: _handleTabToggle,
-        onTabsReordered: _updateMasterTabOrder,
-        onRunoutSettingsChanged: _handleRunoutSettings,
-        onDebriefChanged: _handleDebriefChange,
-        onSmartAlertsChanged: _handleSmartAlertsChange,
-        onImportInventory: _importInventory,
-        onImportActivity: _importActivity,
-        onResetData: _confirmReset,
-        onViewCSVFormats: () {}, // Empty callback
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => SettingsPage(
+          isLightMode: widget.isLightMode,
+          onThemeChanged: _handleThemeTransition,
+          currentPrimaryColor: widget.currentPrimaryColor,
+          onColorChanged: widget.onColorChanged,
+          currentTabs: _visibleTabs,
+          allPossibleTabs: _masterTabList,
+          appVersion: _appVersion,
+          knownRooms: _knownRooms,
+          onViewAbout: () {},
+          onTabToggled: _handleTabToggle,
+          onTabsReordered: _updateMasterTabOrder,
+          onImportInventory: _importInventory,
+          onImportActivity: _importActivity,
+          onResetData: _confirmReset,
+          onViewCSVFormats: () {},
+        ),
       ),
     ).then((_) {
-      // Force refresh Inventory Tab when settings close
       setState(() {
         _inventoryRefreshKey++;
       });
@@ -990,7 +719,7 @@ class _MainShellState extends State<MainShell>
                       ),
                       child: Column(
                         children: [
-                          SizedBox(height: 20),
+                          const SizedBox(height: 20),
                           Expanded(
                             child: ListView.builder(
                               itemCount: _visibleTabs.length,
@@ -999,7 +728,7 @@ class _MainShellState extends State<MainShell>
                                 child: Container(
                                   height: 70,
                                   alignment: Alignment.centerLeft,
-                                  padding: EdgeInsets.only(left: 20),
+                                  padding: const EdgeInsets.only(left: 20),
                                   child: Icon(
                                     _visibleTabs[i].icon,
                                     color: _currentIndex == i
@@ -1038,16 +767,7 @@ class _MainShellState extends State<MainShell>
                     itemCount: _visibleTabs.length,
                     itemBuilder: (c, i) {
                       final id = _visibleTabs[i].id;
-                      if (id == 'home')
-                        return HomeTab(
-                          key: ValueKey(
-                            'home_${_mutedRunoutRooms.length}_${_mutedUsageRooms.length}_${_runoutNotifsEnabled}_$_usageNotifsEnabled',
-                          ),
-                          runoutEnabled: _runoutNotifsEnabled,
-                          usageEnabled: _usageNotifsEnabled,
-                          runoutMutedRooms: _mutedRunoutRooms,
-                          usageMutedRooms: _mutedUsageRooms,
-                        );
+                      if (id == 'home') return const HomeTab();
                       if (id == 'morning') return const MorningBriefTab();
                       if (id == 'night')
                         return NightDebriefTab(

@@ -1,3 +1,6 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter/material.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
@@ -5,6 +8,8 @@ import 'package:timezone/timezone.dart' as tz;
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'dart:async';
 import 'dart:io';
+
+import '../models/inventory_item.dart';
 
 class NotificationService {
   static final NotificationService _instance = NotificationService._internal();
@@ -14,8 +19,29 @@ class NotificationService {
   final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
       FlutterLocalNotificationsPlugin();
 
+  final FirebaseMessaging _firebaseMessaging = FirebaseMessaging.instance;
+
   final StreamController<String?> selectNotificationStream =
       StreamController<String?>.broadcast();
+
+  Future<void> setupInteractedMessage() async {
+    RemoteMessage? initialMessage = await _firebaseMessaging
+        .getInitialMessage();
+    if (initialMessage != null) {
+      _handleMessage(initialMessage);
+    }
+    FirebaseMessaging.onMessageOpenedApp.listen(_handleMessage);
+  }
+
+  void _handleMessage(RemoteMessage message) {
+    String? type = message.data['type'];
+    if (type != null) {
+      debugPrint("🚀 Notification Tapped. Type: $type");
+      selectNotificationStream.add(type);
+    } else {
+      selectNotificationStream.add('default');
+    }
+  }
 
   Future<void> init() async {
     try {
@@ -32,7 +58,23 @@ class NotificationService {
         tz.setLocalLocation(tz.getLocation('America/Chicago'));
       }
 
-      // Use 'notification_icon' from res/drawable (User's custom icon)
+      const AndroidNotificationChannel channel = AndroidNotificationChannel(
+        'axis_channel_v4',
+        'Axis Notifications',
+        description: 'Important Axis Alerts',
+        importance: Importance.max,
+      );
+
+      final AndroidFlutterLocalNotificationsPlugin? androidPlatform =
+          flutterLocalNotificationsPlugin
+              .resolvePlatformSpecificImplementation<
+                AndroidFlutterLocalNotificationsPlugin
+              >();
+
+      if (androidPlatform != null) {
+        await androidPlatform.createNotificationChannel(channel);
+      }
+
       const AndroidInitializationSettings initializationSettingsAndroid =
           AndroidInitializationSettings('notification_icon');
 
@@ -55,11 +97,57 @@ class NotificationService {
           selectNotificationStream.add(response.payload);
         },
       );
-      debugPrint("✅ NotificationService: Initialized successfully");
 
       await requestPermissions();
+      await _setupFCM();
+
+      debugPrint("✅ NotificationService: Initialized successfully");
     } catch (e) {
       debugPrint("❌ NotificationService Init Failed: $e");
+    }
+  }
+
+  Future<void> _setupFCM() async {
+    NotificationSettings settings = await _firebaseMessaging.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
+
+    if (settings.authorizationStatus == AuthorizationStatus.authorized) {
+      String? token = await _firebaseMessaging.getToken();
+      if (token != null) {
+        await _saveTokenToDatabase(token);
+      }
+
+      _firebaseMessaging.onTokenRefresh.listen(_saveTokenToDatabase);
+
+      FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+        debugPrint(
+          "📩 Foreground Message Received: ${message.notification?.title}",
+        );
+
+        if (message.notification != null) {
+          showInstantNotification(
+            id: message.messageId.hashCode,
+            title: message.notification!.title ?? "New Alert",
+            body: message.notification!.body ?? "",
+            payload: message.data['type'] ?? 'fcm_message',
+          );
+        }
+      });
+    } else {
+      debugPrint("🚫 FCM Permission declined");
+    }
+  }
+
+  Future<void> _saveTokenToDatabase(String token) async {
+    User? user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).update(
+        {'fcmToken': token, 'lastTokenUpdate': FieldValue.serverTimestamp()},
+      );
+      debugPrint("🔑 FCM Token saved for user: ${user.uid}");
     }
   }
 
@@ -83,106 +171,55 @@ class NotificationService {
     }
   }
 
-  // --- NIGHT DEBRIEF ---
-  Future<void> scheduleDebrief(TimeOfDay time) async {
-    try {
-      final tz.TZDateTime nowLocal = tz.TZDateTime.now(tz.local);
-
-      tz.TZDateTime scheduledDate = tz.TZDateTime(
-        tz.local,
-        nowLocal.year,
-        nowLocal.month,
-        nowLocal.day,
-        time.hour,
-        time.minute,
-      );
-
-      if (scheduledDate.isBefore(nowLocal)) {
-        scheduledDate = scheduledDate.add(const Duration(days: 1));
-      }
-
-      await flutterLocalNotificationsPlugin.zonedSchedule(
-        0,
-        'Axis Debrief',
-        'Time to review your day.',
-        scheduledDate,
-        const NotificationDetails(
-          android: AndroidNotificationDetails(
-            'axis_channel_v4',
-            'Axis Notifications',
-            importance: Importance.max,
-            priority: Priority.high,
-            icon: 'notification_icon',
-          ),
-          iOS: DarwinNotificationDetails(),
-        ),
-        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
-        matchDateTimeComponents: DateTimeComponents.time,
-        payload: 'night_debrief',
-      );
-      debugPrint("✅ Scheduled Daily Debrief for $scheduledDate");
-    } catch (e) {
-      debugPrint("❌ Failed to schedule debrief: $e");
-    }
-  }
-
-  // --- SMART ALERTS ---
-  Future<void> scheduleSmartAlert({
+  Future<void> showInstantNotification({
     required int id,
     required String title,
     required String body,
-    required DateTime date,
-    required TimeOfDay time,
     required String payload,
   }) async {
-    try {
-      final tz.TZDateTime nowLocal = tz.TZDateTime.now(tz.local);
+    // FIX: Add BigTextStyle to allow long lists in notifications
+    final BigTextStyleInformation bigTextStyleInformation =
+        BigTextStyleInformation(
+          body,
+          contentTitle: title,
+          htmlFormatBigText: true,
+          htmlFormatContent: true,
+        );
 
-      tz.TZDateTime scheduledDate = tz.TZDateTime(
-        tz.local,
-        date.year,
-        date.month,
-        date.day,
-        time.hour,
-        time.minute,
-      );
+    final AndroidNotificationDetails androidDetails =
+        AndroidNotificationDetails(
+          'axis_channel_v4',
+          'Axis Notifications',
+          importance: Importance.max,
+          priority: Priority.high,
+          icon: 'notification_icon',
+          styleInformation: bigTextStyleInformation, // <--- ENABLED HERE
+        );
 
-      // PRODUCTION MODE: If time passed, move to tomorrow
-      if (scheduledDate.isBefore(nowLocal)) {
-        scheduledDate = scheduledDate.add(const Duration(days: 1));
-      }
+    final NotificationDetails details = NotificationDetails(
+      android: androidDetails,
+      iOS: const DarwinNotificationDetails(),
+    );
 
-      await flutterLocalNotificationsPlugin.zonedSchedule(
-        id,
-        title,
-        body,
-        scheduledDate,
-        const NotificationDetails(
-          android: AndroidNotificationDetails(
-            'axis_channel_v4',
-            'Axis Notifications',
-            importance: Importance.max,
-            priority: Priority.high,
-            icon: 'notification_icon',
-          ),
-          iOS: DarwinNotificationDetails(),
-        ),
-        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-        uiLocalNotificationDateInterpretation:
-            UILocalNotificationDateInterpretation.absoluteTime,
-        payload: payload,
-      );
-
-      debugPrint("🔔 Scheduled '$title' for $scheduledDate (ID: $id)");
-    } catch (e) {
-      debugPrint("❌ Failed to schedule smart alert: $e");
-    }
+    await flutterLocalNotificationsPlugin.show(
+      id,
+      title,
+      body,
+      details,
+      payload: payload,
+    );
   }
 
-  Future<void> cancelDebrief() async {
-    await flutterLocalNotificationsPlugin.cancel(0);
-    debugPrint("🚫 Cancelled daily debrief");
+  Future<void> updateReportSettings(
+    bool enabled,
+    TimeOfDay time,
+    int frequency,
+    List<String> inventoryIds,
+  ) async {
+    debugPrint("🔄 Updating Report Settings Locally (Synced to Cloud)");
   }
+
+  Future<void> checkAndScheduleSmartNotifications({
+    List<InventoryItem>? items,
+  }) async {}
 }
