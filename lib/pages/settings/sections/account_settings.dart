@@ -78,6 +78,134 @@ class _AccountSettingsState extends State<AccountSettings> {
     }
   }
 
+  // --- UPDATED: PULL ANALYTICS FROM CLOUD ---
+  Future<void> _viewUserAnalytics() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => Scaffold(
+          appBar: AppBar(
+            title: const Text("User Analytics"),
+            backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+          ),
+          body: StreamBuilder<QuerySnapshot>(
+            stream: FirebaseFirestore.instance
+                .collection('users')
+                .doc(user.uid)
+                .collection('user_analytics')
+                .orderBy('timestamp', descending: true)
+                .snapshots(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                return const Center(
+                  child: Text(
+                    "No cloud data found.\nComplete a Nightly Debrief to start syncing!",
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white54),
+                  ),
+                );
+              }
+
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: SingleChildScrollView(
+                  child: DataTable(
+                    columns: const [
+                      DataColumn(
+                        label: Text(
+                          'Date',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      DataColumn(
+                        label: Text(
+                          'Rating',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      DataColumn(
+                        label: Text(
+                          'Productivity',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      DataColumn(
+                        label: Text(
+                          'Sleep (Exact)',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      DataColumn(
+                        label: Text(
+                          'Wake (Exact)',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                    rows: snapshot.data!.docs.map((doc) {
+                      final data = doc.data() as Map<String, dynamic>;
+
+                      String formatTime(String? t) {
+                        if (t == null || t == "N/A") return "N/A";
+                        try {
+                          DateTime dt = DateTime.parse(t);
+                          return "${dt.hour}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}";
+                        } catch (e) {
+                          return "N/A";
+                        }
+                      }
+
+                      return DataRow(
+                        cells: [
+                          DataCell(
+                            Text(
+                              doc.id,
+                              style: const TextStyle(color: Colors.white70),
+                            ),
+                          ),
+                          DataCell(
+                            Text(
+                              data['rating'] ?? "",
+                              style: const TextStyle(color: Colors.white70),
+                            ),
+                          ),
+                          DataCell(
+                            Text(
+                              data['productivity'] ?? "",
+                              style: const TextStyle(color: Colors.white70),
+                            ),
+                          ),
+                          DataCell(
+                            Text(
+                              formatTime(data['sleepTime']),
+                              style: const TextStyle(color: Colors.white70),
+                            ),
+                          ),
+                          DataCell(
+                            Text(
+                              formatTime(data['wakeTime']),
+                              style: const TextStyle(color: Colors.white70),
+                            ),
+                          ),
+                        ],
+                      );
+                    }).toList(),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildInviteCard(ThemeData theme, Map<String, dynamic> invite) {
     return Container(
       margin: const EdgeInsets.only(bottom: 15),
@@ -246,7 +374,7 @@ class _AccountSettingsState extends State<AccountSettings> {
           trailing: const SizedBox(),
         ),
 
-        // --- NEW: PENDING INVITATIONS ---
+        // --- PENDING INVITATIONS ---
         StreamBuilder<List<Map<String, dynamic>>>(
           stream: FirestoreService().getInvitationsStream(),
           builder: (context, snapshot) {
@@ -277,7 +405,15 @@ class _AccountSettingsState extends State<AccountSettings> {
           },
         ),
 
-        // --- 4. SIGN OUT ---
+        // --- 4. USER ANALYTICS (Matches Switch Inventory Style) ---
+        GradientSettingsTile(
+          icon: Icons.insights,
+          title: "User Analytics",
+          subtitle: "View your history from the cloud",
+          onTap: _viewUserAnalytics,
+        ),
+
+        // --- 5. SIGN OUT ---
         GradientSettingsTile(
           icon: Icons.logout,
           title: "Sign Out",

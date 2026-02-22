@@ -1,14 +1,43 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+// =========================================================
+// GLOBAL MEMORY BANK
+// =========================================================
+class DebriefSession {
+  static bool hasFetchedInitialData = false;
+  static int currentIndex = 0;
+  static Map<String, dynamic> answers = {};
+  static Set<String> selectedMindTiles = {};
+  static List<String> recentMindTiles = [];
+  static List<String> todaysInventoryLogs = [];
+  static DateTime? sleepTime;
+
+  static void reset() {
+    hasFetchedInitialData = false;
+    currentIndex = 0;
+    answers.clear();
+    selectedMindTiles.clear();
+    todaysInventoryLogs.clear();
+    sleepTime = null;
+  }
+}
 
 class NightDebriefTab extends StatefulWidget {
   final bool autoStart;
   final VoidCallback? onConsumeAutoStart;
+  final VoidCallback? onGoToInventory;
+  final VoidCallback? onWakeUp;
 
   const NightDebriefTab({
     super.key,
     this.autoStart = false,
     this.onConsumeAutoStart,
+    this.onGoToInventory,
+    this.onWakeUp,
   });
 
   @override
@@ -16,341 +45,851 @@ class NightDebriefTab extends StatefulWidget {
 }
 
 class _NightDebriefTabState extends State<NightDebriefTab> {
-  // --- CONFIGURATION ---
-  final List<Map<String, dynamic>> _questions = [
-    {"q": "How are you feeling today?", "type": "smiley"},
-    {"q": "How productive were you today?", "type": "productivity"},
-    {"q": "What was the biggest win of the day?", "type": "text"},
-    {"q": "What is one thing you learned?", "type": "text"},
-    {"q": "What is your primary focus for tomorrow?", "type": "text"},
-  ];
-
-  final List<String> _productivityOptions = [
-    "Not Productive",
-    "A Little Productive",
-    "Somewhat Productive",
-    "Productive",
-    "Very Productive",
-  ];
-
-  bool _isSurveyActive = false;
-  int _currentQuestionIndex = 0;
-  final TextEditingController _textController = TextEditingController();
-  int? _selectedScore;
-  List<String> _answers = [];
-
   @override
   void initState() {
     super.initState();
-    _checkAutoStart();
-  }
-
-  @override
-  void didUpdateWidget(NightDebriefTab oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    _checkAutoStart();
-  }
-
-  void _checkAutoStart() {
-    if (widget.autoStart && !_isSurveyActive) {
-      // Schedule the start for the next frame to avoid build collisions
+    if (widget.autoStart) {
       Future.microtask(() {
-        _startSurvey();
-        widget.onConsumeAutoStart
-            ?.call(); // Tell parent to turn off the trigger
+        _startDebrief();
+        widget.onConsumeAutoStart?.call();
       });
     }
   }
 
-  void _startSurvey() {
-    setState(() {
-      _isSurveyActive = true;
-      _currentQuestionIndex = 0;
-      _answers = [];
-      _resetInputs();
-    });
-  }
-
-  void _resetInputs() {
-    _textController.clear();
-    _selectedScore = null;
-  }
-
-  void _nextQuestion() {
-    String currentType = _questions[_currentQuestionIndex]['type'];
-    String answerToSave = "";
-
-    if (currentType == 'text') {
-      if (_textController.text.trim().isEmpty) return;
-      answerToSave = _textController.text.trim();
-    } else if (currentType == 'smiley') {
-      if (_selectedScore == null) return;
-      const moods = ["Very Bad", "Bad", "Neutral", "Good", "Great"];
-      answerToSave = moods[_selectedScore! - 1];
-    } else if (currentType == 'productivity') {
-      if (_selectedScore == null) return;
-      answerToSave = _productivityOptions[_selectedScore!];
-    }
-
-    _answers.add(answerToSave);
-    _resetInputs();
-
-    setState(() {
-      if (_currentQuestionIndex < _questions.length - 1) {
-        _currentQuestionIndex++;
-      } else {
-        _finishSurvey();
-      }
-    });
-  }
-
-  Future<void> _finishSurvey() async {
-    await _logDebriefToHistory();
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Debrief saved to History.")),
-      );
-      setState(() {
-        _isSurveyActive = false;
-      });
-    }
-  }
-
-  Future<void> _logDebriefToHistory() async {
-    final prefs = await SharedPreferences.getInstance();
-    List<String> logs = prefs.getStringList('axis_activity_log') ?? [];
-
-    final DateTime now = DateTime.now();
-    String twoDigits(int n) => n.toString().padLeft(2, '0');
-    final String timestamp =
-        "${now.year}-${twoDigits(now.month)}-${twoDigits(now.day)} ${twoDigits(now.hour)}:${twoDigits(now.minute)}:${twoDigits(now.second)}";
-
-    String combinedAnswers = _answers.join(" // ");
-    String logEntry =
-        "$timestamp|DEBRIEF COMPLETED|Nightly Review|N/A|0|0|$combinedAnswers";
-
-    logs.add(logEntry);
-    await prefs.setStringList('axis_activity_log', logs);
-  }
-
-  // --- WIDGETS ---
-
-  Widget _buildSmileySelector() {
-    const Color themeTeal = Color(0xFF00C897);
-    final icons = [
-      Icons.sentiment_very_dissatisfied,
-      Icons.sentiment_dissatisfied,
-      Icons.sentiment_neutral,
-      Icons.sentiment_satisfied,
-      Icons.sentiment_very_satisfied,
-    ];
-    final colors = [
-      Colors.redAccent,
-      Colors.orangeAccent,
-      Colors.amber,
-      const Color(0xFF66BB6A),
-      themeTeal,
-    ];
-
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: List.generate(5, (index) {
-        final int score = index + 1;
-        final bool isSelected = _selectedScore == score;
-        return GestureDetector(
-          onTap: () {
-            setState(() => _selectedScore = score);
-            Future.delayed(const Duration(milliseconds: 300), () {
-              if (mounted) _nextQuestion();
-            });
-          },
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: isSelected
-                  ? colors[index].withOpacity(0.2)
-                  : Colors.transparent,
-              shape: BoxShape.circle,
-              border: isSelected
-                  ? Border.all(color: colors[index], width: 2)
-                  : null,
-            ),
-            child: Icon(
-              icons[index],
-              size: isSelected ? 45 : 35,
-              color: isSelected ? colors[index] : Colors.white38,
-            ),
-          ),
-        );
-      }),
+  void _startDebrief() async {
+    final result = await Navigator.push(
+      context,
+      PageRouteBuilder(
+        pageBuilder: (context, animation, secondaryAnimation) =>
+            const NightDebriefFlow(),
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          return FadeTransition(opacity: animation, child: child);
+        },
+      ),
     );
+
+    if (result == 'goto_inventory') {
+      widget.onGoToInventory?.call();
+    } else if (result == 'wake_up') {
+      widget.onWakeUp?.call();
+    } else {
+      setState(() {});
+    }
   }
 
-  Widget _buildProductivitySelector() {
-    const Color themeTeal = Color(0xFF00C897);
-    return Column(
-      children: List.generate(_productivityOptions.length, (index) {
-        final bool isSelected = _selectedScore == index;
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 12.0),
-          child: GestureDetector(
-            onTap: () {
-              setState(() => _selectedScore = index);
-              Future.delayed(const Duration(milliseconds: 300), () {
-                if (mounted) _nextQuestion();
-              });
-            },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 20),
-              decoration: BoxDecoration(
-                color: isSelected
-                    ? themeTeal.withOpacity(0.2)
-                    : Colors.white.withOpacity(0.05),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: isSelected ? themeTeal : Colors.white10,
-                  width: isSelected ? 2 : 1,
-                ),
-              ),
-              child: Center(
-                child: Text(
-                  _productivityOptions[index],
-                  style: TextStyle(
-                    color: isSelected ? themeTeal : Colors.white70,
-                    fontWeight: isSelected
-                        ? FontWeight.bold
-                        : FontWeight.normal,
-                    fontSize: 16,
-                  ),
-                ),
-              ),
+  void _showInfoDialog() {
+    showDialog(
+      context: context,
+      builder: (c) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text(
+          "How Data is Stored",
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+        content: const Text(
+          "Your Day Rating, Productivity, and Mind logs are saved to the day you lived (Noon to Noon).\n\n"
+          "Your Sleep Data is saved to the day you wake up.\n\n"
+          "If you sleep on the 19th and wake up on the 20th, two folders are used. If you submit multiple times in a day, duplicates (-2, -3) are generated automatically so no data is lost.",
+          style: TextStyle(color: Colors.white70, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c),
+            child: const Text(
+              "Got it",
+              style: TextStyle(color: Color(0xFF00C897)),
             ),
           ),
-        );
-      }),
+        ],
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    const Color themeTeal = Color(0xFF00C897);
-
-    if (!_isSurveyActive) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.nights_stay, size: 60, color: Colors.white24),
-            const SizedBox(height: 20),
-            const Text(
-              "Nightly Debrief",
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 28,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              "Close your loops. Clear your mind.",
-              style: TextStyle(color: Colors.white54, fontSize: 16),
-            ),
-            const SizedBox(height: 50),
-            ElevatedButton(
-              onPressed: _startSurvey,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: themeTeal,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 40,
-                  vertical: 15,
-                ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(30),
-                ),
-              ),
-              child: const Text("Begin Debrief"),
-            ),
-          ],
-        ),
-      );
-    }
-
-    final currentQ = _questions[_currentQuestionIndex];
-    final String qText = currentQ['q'];
-    final String qType = currentQ['type'];
+    bool isResuming = DebriefSession.currentIndex > 0;
 
     return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(30.0),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.nights_stay, size: 60, color: Colors.white24),
+          const SizedBox(height: 20),
+          const Text(
+            "Nightly Debrief",
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 28,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            isResuming
+                ? "Your session is paused."
+                : "Close your loops. Clear your mind.",
+            style: const TextStyle(color: Colors.white54, fontSize: 16),
+          ),
+          const SizedBox(height: 50),
+
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ElevatedButton(
+                onPressed: _startDebrief,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00C897),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 40,
+                    vertical: 15,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(30),
+                  ),
+                ),
+                child: Text(
+                  isResuming ? "Continue Debrief" : "Begin Debrief",
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+              const SizedBox(width: 15),
+              Container(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white.withOpacity(0.05),
+                ),
+                child: IconButton(
+                  icon: const Icon(Icons.info_outline, color: Colors.white54),
+                  onPressed: _showInfoDialog,
+                  tooltip: "How data is stored",
+                ),
+              ),
+            ],
+          ),
+
+          if (isResuming)
+            Padding(
+              padding: const EdgeInsets.only(top: 20),
+              child: TextButton(
+                onPressed: () {
+                  DebriefSession.reset();
+                  setState(() {});
+                },
+                child: const Text(
+                  "Start Over",
+                  style: TextStyle(color: Colors.white38),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// =========================================================
+// FULL SCREEN FLOW
+// =========================================================
+
+class NightDebriefFlow extends StatefulWidget {
+  final bool
+  startAsleep; // NEW: Tells the page to instantly load the Sleep Screen
+
+  const NightDebriefFlow({super.key, this.startAsleep = false});
+
+  @override
+  State<NightDebriefFlow> createState() => _NightDebriefFlowState();
+}
+
+class _NightDebriefFlowState extends State<NightDebriefFlow>
+    with SingleTickerProviderStateMixin {
+  bool _isAsleep = false;
+  String _userName = "David";
+  late AnimationController _sleepAnimController;
+
+  final List<String> _activeBlocks = [
+    'preset_rate_day',
+    'preset_ai_response_1',
+    'preset_productivity',
+    'preset_mind_tiles',
+    'preset_interesting',
+    'preset_inventory_check',
+    'preset_ai_close_sleep',
+  ];
+
+  final TextEditingController _textController = TextEditingController();
+  final TextEditingController _mindController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _sleepAnimController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 400),
+    );
+
+    // --- INSTANT SLEEP MODE ACTIVATION ---
+    _isAsleep = widget.startAsleep;
+    if (_isAsleep) {
+      _sleepAnimController.value = 1.0; // Instantly jump to fully asleep
+    }
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null &&
+        user.displayName != null &&
+        user.displayName!.isNotEmpty) {
+      _userName = user.displayName!.split(' ').first;
+    }
+
+    _fetchRealData();
+  }
+
+  Future<void> _fetchRealData() async {
+    final now = DateTime.now();
+    final user = FirebaseAuth.instance.currentUser;
+
+    if (!DebriefSession.hasFetchedInitialData && user != null) {
+      Set<String> thirtyDayTiles = {};
+
+      try {
+        final snapshot = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .collection('user_analytics')
+            .get();
+
+        final thirtyDaysAgo = now.subtract(const Duration(days: 30));
+
+        for (var doc in snapshot.docs) {
+          final d = doc.data();
+          if (d['logicalDate'] != null) {
+            try {
+              DateTime dt = DateTime.parse(d['logicalDate']);
+              if (dt.isAfter(thirtyDaysAgo)) {
+                if (d['mindTiles'] != null && d['mindTiles'] is List) {
+                  for (var t in d['mindTiles']) {
+                    if (t.toString().trim().isNotEmpty) {
+                      thirtyDayTiles.add(t.toString().trim());
+                    }
+                  }
+                }
+              }
+            } catch (e) {}
+          }
+        }
+      } catch (e) {
+        debugPrint("Error fetching tiles: $e");
+      }
+
+      DebriefSession.recentMindTiles = thirtyDayTiles.toList();
+      DebriefSession.hasFetchedInitialData = true;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    List<String> activityLogs = prefs.getStringList('axis_activity_log') ?? [];
+    List<String> todaysLogs = [];
+    String todayStr = now.toIso8601String().split('T')[0];
+
+    for (var log in activityLogs) {
+      if (log.startsWith(todayStr)) {
+        var parts = log.split('|');
+        if (parts.length >= 3) {
+          String action = parts[1].toUpperCase();
+          String item = parts[2];
+          if (action.contains("USED"))
+            todaysLogs.add("Used: $item");
+          else if (action.contains("RESTOCK"))
+            todaysLogs.add("Restocked: $item");
+        }
+      }
+    }
+    DebriefSession.todaysInventoryLogs = todaysLogs;
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _sleepAnimController.dispose();
+    _textController.dispose();
+    _mindController.dispose();
+    super.dispose();
+  }
+
+  void _nextBlock() {
+    FocusScope.of(context).unfocus();
+    setState(() {
+      if (DebriefSession.currentIndex < _activeBlocks.length - 1) {
+        DebriefSession.currentIndex++;
+        _textController.clear();
+      }
+    });
+  }
+
+  Future<void> _submitDebriefNow() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final now = DebriefSession.sleepTime ?? DateTime.now();
+
+    DateTime logicalDate = now.subtract(const Duration(hours: 12));
+    String dateStr =
+        "${logicalDate.year}-${logicalDate.month.toString().padLeft(2, '0')}-${logicalDate.day.toString().padLeft(2, '0')}";
+
+    String baseDocId = dateStr;
+    String docId = baseDocId;
+    int suffix = 1;
+
+    while (true) {
+      final docSnap = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('user_analytics')
+          .doc(docId)
+          .get();
+
+      if (!docSnap.exists) break;
+
+      final data = docSnap.data() as Map<String, dynamic>;
+      if (data['rating'] == null || data['rating'].toString().isEmpty) {
+        break;
+      }
+
+      suffix++;
+      docId = "$baseDocId-$suffix";
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('axis_current_doc_id', docId);
+    await prefs.setString('axis_current_sleep_time', now.toIso8601String());
+
+    final interestingStr = (DebriefSession.answers['interesting'] ?? "")
+        .toString();
+
+    await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .collection('user_analytics')
+        .doc(docId)
+        .set({
+          'logicalDate': dateStr,
+          'timestamp': now.toIso8601String(),
+          'createdAt': now.toIso8601String(),
+          'rating': DebriefSession.answers['rate_day'] ?? "",
+          'productivity': DebriefSession.answers['productivity'] ?? "",
+          'mindTiles': DebriefSession.selectedMindTiles.toList(),
+          'interestingNote': interestingStr,
+        }, SetOptions(merge: true));
+  }
+
+  // --- UI PRESETS ---
+
+  Widget _buildRateDay() {
+    final options = [
+      "It was horrible",
+      "It was pretty terrible",
+      "It wasn't great",
+      "It was ok",
+      "It was good",
+      "It was pretty great",
+      "It was amazing!",
+      "Best day ever!",
+    ];
+    return _buildChoiceList("How would you rate today?", options, (choice) {
+      DebriefSession.answers['rate_day'] = choice;
+      _nextBlock();
+    });
+  }
+
+  Widget _buildAIResponse1() {
+    final rating = DebriefSession.answers['rate_day'] ?? "good";
+    String line1 = "I'm glad you're here, $_userName.";
+    String line2 =
+        "You showed up today, and that's enough. Let's clear your mind for tomorrow.";
+
+    if (rating.contains("horrible") || rating.contains("terrible")) {
+      line1 = "I'm so sorry today was rough, $_userName.";
+      line2 =
+          "Take a deep breath. You made it through, and tomorrow is a fresh start.";
+    }
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _nextBlock,
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.85,
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            const SizedBox(height: 100),
             Text(
-              "Question ${_currentQuestionIndex + 1} of ${_questions.length}",
-              style: const TextStyle(
-                color: themeTeal,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 15),
-            Text(
-              qText,
+              line1,
               style: const TextStyle(
                 color: Colors.white,
-                fontSize: 26,
-                fontWeight: FontWeight.bold,
+                fontSize: 22,
+                fontWeight: FontWeight.w600,
               ),
             ),
-            const SizedBox(height: 40),
-            if (qType == 'text')
-              TextField(
-                controller: _textController,
-                style: const TextStyle(color: Colors.white),
-                maxLines: 3,
-                decoration: const InputDecoration(
-                  hintText: "Type your response...",
-                  hintStyle: TextStyle(color: Colors.white30),
-                  enabledBorder: OutlineInputBorder(
-                    borderSide: BorderSide(color: Colors.white24),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderSide: BorderSide(color: themeTeal),
-                  ),
+            const SizedBox(height: 25),
+            Text(
+              line2,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                height: 1.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const Spacer(),
+            const Center(
+              child: Text(
+                "Tap anywhere to continue",
+                style: TextStyle(color: Colors.white38, fontSize: 16),
+              ),
+            ),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProductivity() {
+    final options = [
+      "Not productive",
+      "A little productive",
+      "Somewhat productive",
+      "Productive",
+      "Very Productive",
+    ];
+    return _buildChoiceList(
+      "How productive would you consider your day?",
+      options,
+      (choice) {
+        DebriefSession.answers['productivity'] = choice;
+        _nextBlock();
+      },
+    );
+  }
+
+  Widget _buildMindTiles() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "What was on your mind today?",
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 26,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 20),
+
+        if (DebriefSession.recentMindTiles.isNotEmpty)
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: DebriefSession.recentMindTiles.map((tile) {
+              final isSelected = DebriefSession.selectedMindTiles.contains(
+                tile,
+              );
+              return FilterChip(
+                label: Text(tile),
+                selected: isSelected,
+                selectedColor: const Color(0xFF00C897).withOpacity(0.3),
+                checkmarkColor: const Color(0xFF00C897),
+                backgroundColor: Colors.white10,
+                labelStyle: TextStyle(
+                  color: isSelected ? const Color(0xFF00C897) : Colors.white70,
                 ),
-              )
-            else if (qType == 'smiley')
-              _buildSmileySelector()
-            else if (qType == 'productivity')
-              _buildProductivitySelector(),
-            const SizedBox(height: 40),
-            if (qType == 'text')
-              Align(
-                alignment: Alignment.centerRight,
-                child: ElevatedButton.icon(
-                  onPressed: _nextQuestion,
-                  icon: const Icon(Icons.arrow_forward),
-                  label: Text(
-                    _currentQuestionIndex == _questions.length - 1
-                        ? "Finish"
-                        : "Next",
+                onSelected: (val) {
+                  setState(
+                    () => val
+                        ? DebriefSession.selectedMindTiles.add(tile)
+                        : DebriefSession.selectedMindTiles.remove(tile),
+                  );
+                },
+              );
+            }).toList(),
+          ),
+
+        const SizedBox(height: 30),
+        TextField(
+          controller: _mindController,
+          style: const TextStyle(color: Colors.white),
+          decoration: InputDecoration(
+            hintText: "Type something new...",
+            suffixIcon: IconButton(
+              icon: const Icon(Icons.add_circle, color: Color(0xFF00C897)),
+              onPressed: () {
+                String newTile = _mindController.text.trim();
+                if (newTile.isNotEmpty) {
+                  setState(() {
+                    int idx = DebriefSession.recentMindTiles.indexWhere(
+                      (t) => t.toLowerCase() == newTile.toLowerCase(),
+                    );
+                    if (idx != -1)
+                      DebriefSession.selectedMindTiles.add(
+                        DebriefSession.recentMindTiles[idx],
+                      );
+                    else {
+                      DebriefSession.recentMindTiles.add(newTile);
+                      DebriefSession.selectedMindTiles.add(newTile);
+                    }
+                    _mindController.clear();
+                  });
+                }
+              },
+            ),
+          ),
+        ),
+        const SizedBox(height: 40),
+        _buildNextButton(
+          "Next",
+          onTap: () {
+            DebriefSession.answers['mind_tiles'] = DebriefSession
+                .selectedMindTiles
+                .toList();
+            _nextBlock();
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildInteresting() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "What is the most interesting thing that happened today?",
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 26,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 30),
+        TextField(
+          controller: _textController,
+          style: const TextStyle(color: Colors.white),
+          maxLines: 4,
+        ),
+        const SizedBox(height: 40),
+        _buildNextButton(
+          "Next",
+          onTap: () {
+            DebriefSession.answers['interesting'] = _textController.text.trim();
+            _nextBlock();
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildInventoryCheck() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Did you use or restock anything today?",
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 26,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 20),
+        if (DebriefSession.todaysInventoryLogs.isEmpty)
+          const Text(
+            "No inventory activity logged today.",
+            style: TextStyle(color: Colors.white54),
+          )
+        else
+          ...DebriefSession.todaysInventoryLogs.map(
+            (log) => Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.check_circle,
+                    color: Color(0xFF00C897),
+                    size: 20,
                   ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: themeTeal,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 30,
-                      vertical: 12,
-                    ),
+                  const SizedBox(width: 10),
+                  Text(
+                    log,
+                    style: const TextStyle(color: Colors.white70, fontSize: 16),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        const SizedBox(height: 40),
+        OutlinedButton.icon(
+          onPressed: () => Navigator.pop(context, 'goto_inventory'),
+          icon: const Icon(Icons.inventory_2),
+          label: const Text("Log a new item now"),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: const Color(0xFF00C897),
+            side: const BorderSide(color: Color(0xFF00C897)),
+            padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 20),
+          ),
+        ),
+        const SizedBox(height: 40),
+        _buildNextButton("Continue Debrief", onTap: () => _nextBlock()),
+      ],
+    );
+  }
+
+  Widget _buildCloseAndSleep() {
+    final phrases = [
+      "You tied off your day, $_userName.",
+      "Great job today, $_userName.",
+      "Rest easy, $_userName. You've earned it.",
+    ];
+    final phrase = phrases[Random().nextInt(phrases.length)];
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onVerticalDragUpdate: (d) => _sleepAnimController.value +=
+          d.primaryDelta! / MediaQuery.of(context).size.height,
+      onVerticalDragEnd: (d) {
+        if (d.primaryVelocity! > 300 || _sleepAnimController.value > 0.3) {
+          _sleepAnimController.forward().then((_) async {
+            setState(() {
+              _isAsleep = true;
+              DebriefSession.sleepTime = DateTime.now();
+            });
+            // LOCKS APP INTO SLEEP MODE
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setBool('axis_is_sleeping', true);
+
+            _submitDebriefNow();
+          });
+        } else {
+          _sleepAnimController.reverse();
+        }
+      },
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.85,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.start,
+          children: [
+            SizedBox(height: MediaQuery.of(context).size.height * 0.25),
+            Text(
+              phrase,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 32,
+                fontWeight: FontWeight.bold,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 15),
+            const Text(
+              "Rest well! I'll hold down the fort.",
+              style: TextStyle(color: Colors.white70, fontSize: 18),
+            ),
+            const SizedBox(height: 15),
+            const Text(
+              "Swipe down to sleep",
+              style: TextStyle(color: Colors.white38, fontSize: 14),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSleepScreen() {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onVerticalDragUpdate: (details) {
+        if (details.delta.dy < -5) {
+          _sleepAnimController.reverse().then((_) async {
+            // UNLOCKS APP FROM SLEEP MODE
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setBool('axis_is_sleeping', false);
+
+            DebriefSession.reset();
+            if (mounted) Navigator.pop(context, 'wake_up');
+          });
+        }
+      },
+      child: const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.nights_stay, size: 60, color: Colors.white24),
+            SizedBox(height: 20),
+            Text(
+              "You are in sleep mode.\nSwipe UP anywhere to wake up!",
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white24, fontSize: 16),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChoiceList(
+    String title,
+    List<String> options,
+    Function(String) onSelect,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 26,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 30),
+        ...options.map(
+          (opt) => Padding(
+            padding: const EdgeInsets.only(bottom: 12.0),
+            child: InkWell(
+              onTap: () => onSelect(opt),
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(
+                  vertical: 18,
+                  horizontal: 20,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white10),
+                ),
+                child: Text(
+                  opt,
+                  style: const TextStyle(color: Colors.white70, fontSize: 16),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNextButton(String label, {VoidCallback? onTap}) {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: ElevatedButton(
+        onPressed: onTap ?? _nextBlock,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFF00C897),
+          foregroundColor: Colors.black,
+          padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 15),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(30),
+          ),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    Widget content = const SizedBox();
+    if (!_isAsleep) {
+      switch (_activeBlocks[DebriefSession.currentIndex]) {
+        case 'preset_rate_day':
+          content = _buildRateDay();
+          break;
+        case 'preset_ai_response_1':
+          content = _buildAIResponse1();
+          break;
+        case 'preset_productivity':
+          content = _buildProductivity();
+          break;
+        case 'preset_mind_tiles':
+          content = _buildMindTiles();
+          break;
+        case 'preset_interesting':
+          content = _buildInteresting();
+          break;
+        case 'preset_inventory_check':
+          content = _buildInventoryCheck();
+          break;
+        case 'preset_ai_close_sleep':
+          content = _buildCloseAndSleep();
+          break;
+      }
+    }
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          AnimatedBuilder(
+            animation: _sleepAnimController,
+            builder: (c, _) => Transform.translate(
+              offset: Offset(
+                0,
+                MediaQuery.of(context).size.height *
+                    _sleepAnimController.value *
+                    0.75,
+              ),
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Colors.transparent,
+                      Colors.transparent,
+                      theme.colorScheme.primary.withOpacity(0.3),
+                      theme.colorScheme.primary,
+                    ],
+                    stops: const [0.0, 0.2, 0.6, 1.0],
                   ),
                 ),
               ),
-          ],
-        ),
+            ),
+          ),
+          SafeArea(
+            child: _isAsleep
+                ? _buildSleepScreen()
+                : Center(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(30.0),
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 300),
+                        child: Container(
+                          key: ValueKey<String>(
+                            _activeBlocks[DebriefSession.currentIndex],
+                          ),
+                          child: content,
+                        ),
+                      ),
+                    ),
+                  ),
+          ),
+          if (!_isAsleep)
+            Positioned(
+              top: 50,
+              right: 20,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white54),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ),
+        ],
       ),
     );
   }

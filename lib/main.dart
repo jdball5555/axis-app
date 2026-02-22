@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:file_picker/file_picker.dart';
@@ -9,24 +10,28 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart'; // REQUIRED FOR API SECRETS
 import 'firebase_options.dart';
 
 import 'services/notification_service.dart';
 import 'services/firestore_service.dart';
+// import 'services/ai_service.dart'; // ARCHIVED
 import 'models/tab_data.dart';
 
 import 'pages/home_page.dart';
 import 'pages/morning_page.dart';
+import 'pages/morning_briefing.dart';
 import 'pages/inventory_page.dart';
 import 'pages/stats_page.dart';
 import 'pages/night_page.dart';
+// import 'pages/ai_chat_page.dart'; // ARCHIVED
+import 'pages/finances_page.dart'; // YOUR NEW FINANCES PAGE
 import 'pages/settings/settings_page.dart';
 import 'pages/settings/sections/switch_inventories_settings.dart';
 import 'pages/sign_in_page.dart';
 
-const String _appVersion = "0.6.0";
+const String _appVersion = "0.7.4";
 
-// --- BACKGROUND HANDLER ---
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
@@ -35,9 +40,11 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  // Register Background Handler
+  // LOAD THE HIDDEN API KEY FILE
+  await dotenv.load(fileName: ".env");
+
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
   await NotificationService().init();
@@ -67,26 +74,20 @@ class _AxisAppState extends State<AxisApp> {
     final int? colorValue = prefs.getInt('axis_primary_color');
     setState(() {
       _themeMode = isLight ? ThemeMode.light : ThemeMode.dark;
-      if (colorValue != null) {
-        _primaryColor = Color(colorValue);
-      }
+      if (colorValue != null) _primaryColor = Color(colorValue);
     });
   }
 
   void _toggleTheme(bool isLight) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('axis_is_light_mode', isLight);
-    setState(() {
-      _themeMode = isLight ? ThemeMode.light : ThemeMode.dark;
-    });
+    setState(() => _themeMode = isLight ? ThemeMode.light : ThemeMode.dark);
   }
 
   void _updateColor(Color color) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt('axis_primary_color', color.value);
-    setState(() {
-      _primaryColor = color;
-    });
+    setState(() => _primaryColor = color);
   }
 
   ThemeData _buildTheme(Brightness brightness, Color primary) {
@@ -182,38 +183,32 @@ class MainShell extends StatefulWidget {
   State<MainShell> createState() => _MainShellState();
 }
 
-class _MainShellState extends State<MainShell>
-    with SingleTickerProviderStateMixin {
+class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
   final PageController _pageController = PageController();
   int _currentIndex = 0;
   int _inventoryRefreshKey = 0;
   bool _triggerNightSurvey = false;
+
   late AnimationController _transitionController;
   bool _isTransitioning = false;
   Color _transitionColor = Colors.black;
   Color _baseColor = Colors.black;
   Alignment _transitionAlignment = Alignment.center;
 
-  String? _currentHouseholdId;
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
 
-  // SUBSCRIPTIONS
+  String? _currentHouseholdId;
   StreamSubscription? _householdSub;
   StreamSubscription? _inventorySub;
   StreamSubscription? _userStateSub;
   StreamSubscription? _notificationSub;
 
-  // STATE TRACKING
   bool _isCreatingNewHousehold = false;
   List<String> _knownRooms = [];
+  List<TabData> _masterTabList = TabData.allTabs;
 
-  List<TabData> _masterTabList = [
-    TabData(id: 'home', icon: Icons.home_filled),
-    TabData(id: 'inventory', icon: Icons.inventory_2),
-    TabData(id: 'stats', icon: Icons.bar_chart),
-    TabData(id: 'morning', icon: Icons.wb_sunny),
-    TabData(id: 'night', icon: Icons.nights_stay),
-  ];
-
+  // REMOVED 'ai' FROM DEFAULT ACTIVE TABS
   Set<String> _activeTabIds = {'home', 'inventory', 'stats'};
 
   List<TabData> get _visibleTabs =>
@@ -225,15 +220,20 @@ class _MainShellState extends State<MainShell>
     final db = FirestoreService();
     db.init();
 
-    // 1. Listen for Household Changes
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2000),
+    );
+    _pulseAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+
     _householdSub = db.currentHouseholdIdStream.listen((id) {
       bool isFirstLoad = _currentHouseholdId == null;
-
       if (id != null && id != _currentHouseholdId) {
         setState(() => _currentHouseholdId = id);
         setState(() => _inventoryRefreshKey++);
         _setupInventoryListener();
-
         if (mounted && !isFirstLoad) {
           Navigator.of(context).popUntil((route) => route.isFirst);
           _switchToInventoryTab();
@@ -241,22 +241,15 @@ class _MainShellState extends State<MainShell>
       }
     });
 
-    // 2. Setup Local Listeners
     _setupUserStateListener();
-
-    // 3. Setup Notifications
     _loadTabState();
     NotificationService().requestPermissions();
     NotificationService().checkAndScheduleSmartNotifications();
     NotificationService().setupInteractedMessage();
 
-    // 4. Listen for Notification Taps
     _notificationSub = NotificationService().selectNotificationStream.stream
         .listen((payload) {
-          debugPrint("🔔 Notification Tapped with payload: $payload");
-
           if (payload == 'invite') {
-            // CASE A: It's an Invite -> Go to Settings/Switch Inventory
             Navigator.push(
               context,
               MaterialPageRoute(
@@ -264,7 +257,6 @@ class _MainShellState extends State<MainShell>
               ),
             );
           } else {
-            // CASE B: It's anything else -> "Open like normal" (Go to Default Startup Page)
             _loadStartupPage(forceDefault: true);
           }
         });
@@ -274,7 +266,34 @@ class _MainShellState extends State<MainShell>
       duration: const Duration(seconds: 12),
     );
 
-    _loadStartupPage();
+    _checkStartupState();
+  }
+
+  Future<void> _checkStartupState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final isSleeping = prefs.getBool('axis_is_sleeping') ?? false;
+
+    await _loadStartupPage();
+
+    if (isSleeping) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        final result = await Navigator.push(
+          context,
+          PageRouteBuilder(
+            pageBuilder: (context, animation, secondaryAnimation) =>
+                const NightDebriefFlow(startAsleep: true),
+            transitionsBuilder:
+                (context, animation, secondaryAnimation, child) {
+                  return FadeTransition(opacity: animation, child: child);
+                },
+          ),
+        );
+
+        if (result == 'wake_up') {
+          _launchMorningBriefing();
+        }
+      });
+    }
   }
 
   void _setupInventoryListener() {
@@ -285,11 +304,7 @@ class _MainShellState extends State<MainShell>
           .map((i) => i.name)
           .toSet();
       foundRooms.addAll(items.map((i) => i.roomLocation).whereType<String>());
-
-      setState(() {
-        _knownRooms = foundRooms.toList()..sort();
-      });
-
+      setState(() => _knownRooms = foundRooms.toList()..sort());
       NotificationService().checkAndScheduleSmartNotifications(items: items);
     });
   }
@@ -297,7 +312,6 @@ class _MainShellState extends State<MainShell>
   void _setupUserStateListener() {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-
     _userStateSub?.cancel();
     _userStateSub = FirebaseFirestore.instance
         .collection('users')
@@ -305,26 +319,17 @@ class _MainShellState extends State<MainShell>
         .snapshots()
         .listen((snapshot) async {
           if (!snapshot.exists) return;
-
           List joined = snapshot.data()?['joinedHouseholds'] ?? [];
           String? currentId = FirestoreService().currentHouseholdId;
-
           if (joined.isEmpty) {
             if (!_isCreatingNewHousehold) {
               _isCreatingNewHousehold = true;
-              debugPrint(
-                "⚠️ No inventories found. Auto-creating 'My Inventory'...",
-              );
               await FirestoreService().createHousehold("My Inventory");
               _isCreatingNewHousehold = false;
             }
             return;
           }
-
           if (currentId != null && !joined.contains(currentId)) {
-            debugPrint(
-              "⚠️ Removed from current inventory ($currentId). Switching...",
-            );
             String nextId = joined.first;
             await FirestoreService().switchHousehold(nextId);
           }
@@ -338,22 +343,17 @@ class _MainShellState extends State<MainShell>
     _userStateSub?.cancel();
     _notificationSub?.cancel();
     _transitionController.dispose();
+    _pulseController.dispose();
     super.dispose();
   }
 
   Future<void> _loadStartupPage({bool forceDefault = false}) async {
     final prefs = await SharedPreferences.getInstance();
-
-    // Default to 'home' if not set
     final defaultTabId = prefs.getString('default_startup_tab') ?? 'home';
-
     final index = _visibleTabs.indexWhere((t) => t.id == defaultTabId);
     if (index != -1) {
-      // If forced (clicked notification) OR purely startup
-      if (forceDefault) {
+      if (forceDefault)
         Navigator.of(context).popUntil((route) => route.isFirst);
-      }
-
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_pageController.hasClients) {
           setState(() => _currentIndex = index);
@@ -371,7 +371,33 @@ class _MainShellState extends State<MainShell>
     }
   }
 
-  // --- REMOVED: void _switchToHomeTab() { ... } ---
+  void _switchToHomeTab() {
+    final index = _visibleTabs.indexWhere((t) => t.id == 'home');
+    if (index != -1 && _currentIndex != index) {
+      setState(() => _currentIndex = index);
+      _pageController.jumpToPage(index);
+    }
+  }
+
+  Future<void> _launchMorningBriefing() async {
+    final result = await Navigator.push(
+      context,
+      PageRouteBuilder(
+        pageBuilder: (c, a1, a2) => const MorningBriefingView(),
+        transitionsBuilder: (c, anim, a2, child) => SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(0, 1),
+            end: Offset.zero,
+          ).animate(anim),
+          child: child,
+        ),
+      ),
+    );
+
+    if (result == true) {
+      _switchToHomeTab();
+    }
+  }
 
   Future<void> _importActivity() async {
     try {
@@ -383,14 +409,12 @@ class _MainShellState extends State<MainShell>
         File file = File(result.files.single.path!);
         String content = await file.readAsString();
         List<String> lines = const LineSplitter().convert(content);
-        List<String> validLines = [];
-        for (int i = 1; i < lines.length; i++) {
-          String line = lines[i];
-          if (line.trim().isNotEmpty) validLines.add(line);
-        }
+        List<String> validLines = lines
+            .where((l) => l.trim().isNotEmpty)
+            .skip(1)
+            .toList();
         if (validLines.isNotEmpty) {
-          final db = FirestoreService();
-          await db.batchImportLogs(validLines);
+          await FirestoreService().batchImportLogs(validLines);
           setState(() => _inventoryRefreshKey++);
           if (mounted) {
             Navigator.pop(context);
@@ -407,77 +431,6 @@ class _MainShellState extends State<MainShell>
           context,
         ).showSnackBar(SnackBar(content: Text("Error: $e")));
     }
-  }
-
-  void _handleThemeTransition(bool toLightMode) async {
-    Navigator.pop(context);
-    int homeIndex = _visibleTabs.indexWhere((t) => t.id == 'home');
-    if (homeIndex != -1) {
-      setState(() => _currentIndex = homeIndex);
-      _pageController.jumpToPage(homeIndex);
-    }
-    _transitionController.reset();
-    setState(() {
-      _isTransitioning = true;
-      _baseColor = toLightMode ? Colors.black : const Color(0xFFF2F2F2);
-      _transitionColor = toLightMode ? const Color(0xFFF2F2F2) : Colors.black;
-      _transitionAlignment = toLightMode
-          ? Alignment.bottomRight
-          : Alignment.topLeft;
-    });
-    _transitionController.forward();
-    await Future.delayed(const Duration(milliseconds: 100));
-    widget.onThemeChanged(toLightMode);
-    await Future.delayed(const Duration(milliseconds: 11900));
-    if (mounted)
-      setState(() {
-        _isTransitioning = false;
-        _baseColor = toLightMode ? const Color(0xFFF2F2F2) : Colors.black;
-      });
-  }
-
-  void _handleTabToggle(String id, bool active) {
-    setState(() {
-      if (active)
-        _activeTabIds.add(id);
-      else if (_activeTabIds.length > 1)
-        _activeTabIds.remove(id);
-    });
-    _saveTabState();
-  }
-
-  void _updateMasterTabOrder(List<TabData> newOrder) {
-    setState(() => _masterTabList = List.from(newOrder));
-    _saveTabState();
-  }
-
-  Future<void> _loadTabState() async {
-    final prefs = await SharedPreferences.getInstance();
-    final s = prefs.getString('axis_tab_master_order');
-    if (s != null) {
-      final l = jsonDecode(s);
-      _masterTabList = (l as List).map((e) => TabData.fromJson(e)).toList();
-    }
-    final a = prefs.getStringList('axis_active_tab_ids');
-    if (a != null) _activeTabIds = a.toSet();
-    setState(() {});
-  }
-
-  Future<void> _saveTabState() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      'axis_tab_master_order',
-      jsonEncode(_masterTabList.map((e) => e.toJson()).toList()),
-    );
-    await prefs.setStringList('axis_active_tab_ids', _activeTabIds.toList());
-  }
-
-  void _onTabTapped(int index) {
-    _pageController.animateToPage(
-      index,
-      duration: const Duration(milliseconds: 150),
-      curve: Curves.easeOut,
-    );
   }
 
   Future<void> _importInventory() async {
@@ -537,18 +490,100 @@ class _MainShellState extends State<MainShell>
               final db = FirestoreService();
               final invSnap = await db.inventoryCollection.get();
               final logSnap = await db.logCollection.get();
-
               final batch = FirebaseFirestore.instance.batch();
               for (var doc in invSnap.docs) batch.delete(doc.reference);
               for (var doc in logSnap.docs) batch.delete(doc.reference);
               await batch.commit();
-
               setState(() => _inventoryRefreshKey++);
               if (mounted) Navigator.pop(ctx);
             },
           ),
         ],
       ),
+    );
+  }
+
+  void _handleThemeTransition(bool toLightMode) async {
+    Navigator.pop(context);
+    int homeIndex = _visibleTabs.indexWhere((t) => t.id == 'home');
+    if (homeIndex != -1) {
+      setState(() => _currentIndex = homeIndex);
+      _pageController.jumpToPage(homeIndex);
+    }
+    _transitionController.reset();
+    setState(() {
+      _isTransitioning = true;
+      _baseColor = toLightMode ? Colors.black : const Color(0xFFF2F2F2);
+      _transitionColor = toLightMode ? const Color(0xFFF2F2F2) : Colors.black;
+      _transitionAlignment = toLightMode
+          ? Alignment.bottomRight
+          : Alignment.topLeft;
+    });
+    _transitionController.forward();
+    await Future.delayed(const Duration(milliseconds: 100));
+    widget.onThemeChanged(toLightMode);
+    await Future.delayed(const Duration(milliseconds: 11900));
+    if (mounted) setState(() => _isTransitioning = false);
+  }
+
+  void _handleTabToggle(String id, bool active) {
+    setState(() {
+      active ? _activeTabIds.add(id) : _activeTabIds.remove(id);
+    });
+    _saveTabState();
+  }
+
+  void _updateMasterTabOrder(List<TabData> newOrder) {
+    setState(() => _masterTabList = List.from(newOrder));
+    _saveTabState();
+  }
+
+  Future<void> _loadTabState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final s = prefs.getString('axis_tab_master_order');
+    if (s != null) {
+      final List<dynamic> jsonList = jsonDecode(s);
+      List<TabData> savedTabs = jsonList
+          .map((e) => TabData.fromJson(e))
+          .toList();
+
+      // PURGE THE GHOST TAB FROM MEMORY SO IT NEVER LOADS
+      savedTabs.removeWhere((t) => t.id == 'ai');
+
+      for (var defaultTab in TabData.allTabs) {
+        if (!savedTabs.any((t) => t.id == defaultTab.id) &&
+            defaultTab.id != 'ai') {
+          savedTabs.add(defaultTab);
+          _activeTabIds.add(defaultTab.id);
+        }
+      }
+      _masterTabList = savedTabs;
+
+      final a = prefs.getStringList('axis_active_tab_ids');
+      if (a != null) {
+        _activeTabIds = a.toSet();
+        _activeTabIds.remove('ai'); // PURGE FROM ACTIVE LIST TOO
+      }
+    } else {
+      _masterTabList = TabData.allTabs.where((t) => t.id != 'ai').toList();
+    }
+    setState(() {});
+  }
+
+  Future<void> _saveTabState() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      'axis_tab_master_order',
+      jsonEncode(_masterTabList.map((e) => e.toJson()).toList()),
+    );
+    await prefs.setStringList('axis_active_tab_ids', _activeTabIds.toList());
+  }
+
+  void _onTabTapped(int index) {
+    _pageController.animateToPage(
+      index,
+      duration: const Duration(milliseconds: 150),
+      curve: Curves.easeOut,
     );
   }
 
@@ -574,11 +609,7 @@ class _MainShellState extends State<MainShell>
           onViewCSVFormats: () {},
         ),
       ),
-    ).then((_) {
-      setState(() {
-        _inventoryRefreshKey++;
-      });
-    });
+    ).then((_) => setState(() => _inventoryRefreshKey++));
   }
 
   @override
@@ -671,10 +702,7 @@ class _MainShellState extends State<MainShell>
               child: AnimatedBuilder(
                 animation: _transitionController,
                 builder: (context, child) => CustomPaint(
-                  size: Size(
-                    MediaQuery.of(context).size.width,
-                    MediaQuery.of(context).size.height,
-                  ),
+                  size: Size.infinite,
                   painter: PixelWipePainter(
                     fraction: _transitionController.value,
                     color: _transitionColor,
@@ -700,6 +728,7 @@ class _MainShellState extends State<MainShell>
               ),
             ),
           ),
+
           Container(
             child: Row(
               children: [
@@ -769,23 +798,65 @@ class _MainShellState extends State<MainShell>
                       final id = _visibleTabs[i].id;
                       if (id == 'home') return const HomeTab();
                       if (id == 'morning') return const MorningBriefTab();
-                      if (id == 'night')
+
+                      if (id == 'night') {
                         return NightDebriefTab(
                           autoStart: _triggerNightSurvey,
                           onConsumeAutoStart: () =>
                               setState(() => _triggerNightSurvey = false),
+                          onGoToInventory: _switchToInventoryTab,
+                          onWakeUp: _launchMorningBriefing,
                         );
-                      if (id == 'inventory')
+                      }
+
+                      if (id == 'inventory') {
                         return AxisInventoryTab(
                           key: ValueKey(_inventoryRefreshKey),
                         );
-                      if (id == 'stats')
+                      }
+                      if (id == 'stats') {
                         return StatsPage(key: ValueKey(_inventoryRefreshKey));
+                      }
+
+                      // if (id == 'ai') return const AxisAIChatPage(); // ARCHIVED
+
+                      if (id == 'finances') return const FinancesTab();
+
                       return const SizedBox();
                     },
                   ),
                 ),
               ],
+            ),
+          ),
+
+          Positioned.fill(
+            child: IgnorePointer(
+              child: AnimatedBuilder(
+                animation: _pulseAnimation,
+                builder: (context, child) {
+                  final double currentOpacity =
+                      lerpDouble(0.3, 0.8, _pulseAnimation.value) ?? 0.0;
+                  final double currentRadius =
+                      lerpDouble(0.8, 3.5, _pulseAnimation.value) ?? 1.8;
+                  return Opacity(
+                    opacity: currentOpacity,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          center: Alignment.bottomRight,
+                          radius: currentRadius,
+                          colors: [
+                            theme.colorScheme.primary.withOpacity(0.5),
+                            Colors.transparent,
+                          ],
+                          stops: const [0.0, 1.0],
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
             ),
           ),
         ],
@@ -816,18 +887,16 @@ class PixelWipePainter extends CustomPainter {
     for (double y = 0; y < size.height; y += step) {
       for (double x = 0; x < size.width; x += step) {
         double dist;
-        if (alignment == Alignment.topLeft) {
+        if (alignment == Alignment.topLeft)
           dist = sqrt(x * x + y * y);
-        } else {
+        else {
           double dx = size.width - x;
           double dy = size.height - y;
           dist = sqrt(dx * dx + dy * dy);
         }
         double distFraction = dist / maxDist;
-        double threshold = (distFraction * 0.7) + (random.nextDouble() * 0.3);
-        if (fraction > threshold) {
+        if (fraction > (distFraction * 0.7) + (random.nextDouble() * 0.3))
           canvas.drawRect(Rect.fromLTWH(x, y, step + 0.5, step + 0.5), paint);
-        }
       }
     }
   }

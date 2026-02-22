@@ -38,10 +38,9 @@ function parseFlutterDate(dateStr) {
 // =========================================================
 // 🧠 SHARED LOGIC: REPORT GENERATION
 // =========================================================
-async function generateUserReport(uid) {
+async function generateUserReport(uid, currentHour) {
   try {
     const now = moment().tz("America/Chicago");
-    const currentHour = now.hour();
 
     const userRef = db.collection("users").doc(uid);
     const userDoc = await userRef.get();
@@ -53,12 +52,10 @@ async function generateUserReport(uid) {
 
     if (!fcmToken || households.length === 0) return;
 
-    // --- 1. DETERMINE ACTIONS ---
-    const checkRunout = (userData.runoutHour === currentHour && userData.runoutEnabled !== false);
-    const checkUsage = (userData.usageHour === currentHour && userData.usageEnabled !== false);
+    // --- 1. DETERMINE IF USER GETS A REPORT ---
     const checkReport = (userData.reportHour === currentHour && userData.reportEnabled === true);
-
     let sendReportNow = false;
+    
     if (checkReport) {
       const lastSent = userData.lastReportSent ? userData.lastReportSent.toDate() : null;
       const freqDays = userData.reportFrequency || 1;
@@ -70,11 +67,10 @@ async function generateUserReport(uid) {
       }
     }
 
-    if (!checkRunout && !checkUsage && !sendReportNow) return;
-
     // --- 2. GATHER DATA ---
     const reportGroups = {}; 
-    const alertMessages = [];
+    const restockMessages = [];
+    const usageMessages = []; 
     const reportIds = userData.reportInventoryIds || [];
 
     for (const householdId of households) {
@@ -91,8 +87,11 @@ async function generateUserReport(uid) {
       const customThresholds = hhData.runoutThresholds || [7, 3, 0];
 
       const includeInReport = sendReportNow && (reportIds.length === 0 || reportIds.includes(householdId));
-      const enableRunoutForHH = checkRunout && hhData.runoutEnabled !== false;
-      const enableUsageForHH = checkUsage && hhData.usageEnabled !== false;
+      
+      const enableRunoutForHH = (hhData.runoutHour === currentHour && hhData.runoutEnabled !== false);
+      const enableUsageForHH = (hhData.usageHour === currentHour && hhData.usageEnabled !== false);
+
+      if (!includeInReport && !enableRunoutForHH && !enableUsageForHH) continue;
 
       const rawLogs = logsSnap.docs.map(d => d.data());
       const aggregates = {};
@@ -122,7 +121,7 @@ async function generateUserReport(uid) {
         if (item.type === 'Room') return;
         const nameKey = (item.name || "").trim().toLowerCase();
         let itemRoom = (item.roomLocation || "").trim().toLowerCase();
-        if (itemRoom === "" || itemRoom === "n/a") itemRoom = "unknown";
+        if (itemRoom === "unknown") itemRoom = "unknown";
 
         const specificLogs = rawLogs.filter(log => {
           let logName = (log.item || "").toString().trim().toLowerCase();
@@ -131,9 +130,7 @@ async function generateUserReport(uid) {
           if (logRoom === "" || logRoom === "n/a") logRoom = "unknown";
           
           const nameMatch = (logName === nameKey);
-          let roomMatch = false;
-          if (itemRoom === "unknown") roomMatch = (logRoom === "unknown");
-          else roomMatch = (logRoom === itemRoom || logRoom === "unknown");
+          const roomMatch = (itemRoom === "unknown") ? (logRoom === "unknown") : (logRoom === itemRoom || logRoom === "unknown");
 
           return nameMatch && roomMatch && (log.action || "").toString().toUpperCase().includes("USED");
         });
@@ -173,28 +170,31 @@ async function generateUserReport(uid) {
           const daysLeft = Math.round(stockDurationDays - daysSinceLastUse);
           const icon = getStatusIcon(daysLeft);
 
-          // ALERTS
+          // RESTOCK WARNING 
           if (enableRunoutForHH && agg.totalQty > 0) {
              if (customThresholds.includes(daysLeft)) {
-                alertMessages.push(`${agg.realName}: ${daysLeft} days left ${icon}`);
+                restockMessages.push(`• ${agg.realName} will run out in approximately ${daysLeft} days`);
              }
           }
 
+          // USAGE REMINDER 
           if (enableUsageForHH && agg.totalQty > 0) {
              const daysPerItem = Math.round(1.0 / agg.totalDailyRate);
              if (daysSinceLastUse >= daysPerItem) {
-                alertMessages.push(`Use ${agg.realName}`);
+                const expectedDate = moment(agg.newestDate).add(daysPerItem, 'days').format("MMMM Do");
+                usageMessages.push(`• ${agg.realName} was expected to be used on ${expectedDate}`);
              }
           }
 
           // REPORT LINES
           if (includeInReport) {
-            if (daysLeft < 20) {
-              let line = `• ${agg.realName}: ${daysLeft}d`;
-              if (icon) line += ` ${icon}`;
-              inventoryLines.push(line);
-            }
+            let line = `• ${agg.realName}: ${agg.totalQty} in stock (~${daysLeft} days left)`;
+            if (icon) line += ` ${icon}`;
+            inventoryLines.push(line);
           }
+        } 
+        else if (includeInReport) {
+            inventoryLines.push(`• ${agg.realName}: ${agg.totalQty} in stock`);
         }
       });
 
@@ -203,13 +203,27 @@ async function generateUserReport(uid) {
       }
     }
 
-    // --- SEND ALERTS ---
-    if (alertMessages.length > 0) {
-      const alertBody = alertMessages.join("\n");
+    // --- SEND SEPARATE ALERTS ---
+
+    // 1. Restock Needed Notification
+    if (restockMessages.length > 0) {
+      // Using Windows-style Carriage Return to force Android's hand
+      const restockBody = restockMessages.join("\r\n\r\n");
       await admin.messaging().send({
-        notification: { title: "Inventory Alerts", body: alertBody },
-        android: { notification: { icon: "notification_icon", color: "#FF5252" } },
-        data: { type: "inventory_alert" },
+        notification: { title: "Restock Needed", body: restockBody },
+        android: { notification: { icon: "notification_icon", color: "#FF5252", tag: "restock_alert" } },
+        data: { type: "restock_alert" },
+        token: fcmToken,
+      });
+    }
+
+    // 2. Usage Reminder Notification
+    if (usageMessages.length > 0) {
+      const usageBody = usageMessages.join("\r\n\r\n");
+      await admin.messaging().send({
+        notification: { title: "Usage Reminder", body: usageBody },
+        android: { notification: { icon: "notification_icon", color: "#FF9800", tag: "usage_alert" } }, 
+        data: { type: "usage_alert" },
         token: fcmToken,
       });
     }
@@ -221,23 +235,23 @@ async function generateUserReport(uid) {
 
       if (inventoryNames.length > 0) {
          inventoryNames.forEach((invName, index) => {
-           if (index > 0) reportBody += "\n";
+           if (index > 0) reportBody += "\r\n\r\n";
            const lines = reportGroups[invName];
-           reportBody += `${invName}\n`; 
+           reportBody += `=== ${invName} ===\r\n\r\n`; 
            lines.forEach(line => {
-             reportBody += `${line}\n`;
+             reportBody += `${line}\r\n`;
            });
          });
       } else {
-         reportBody = "Everything is well stocked.";
+         reportBody = "Your inventory is currently empty.";
       }
 
       if (reportBody.length > 0) {
         if (reportBody.length > 3500) reportBody = reportBody.substring(0, 3500) + "...";
         
         await admin.messaging().send({
-          notification: { title: "Inventory Report", body: reportBody },
-          android: { notification: { icon: "notification_icon", color: "#00C897" } },
+          notification: { title: "Your Axis Inventory Report", body: reportBody },
+          android: { notification: { icon: "notification_icon", color: "#00C897", tag: "inventory_report" } },
           data: { type: "inventory_report" },
           token: fcmToken,
         });
@@ -247,7 +261,7 @@ async function generateUserReport(uid) {
     }
 
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Error in generateUserReport:", error);
   }
 }
 
@@ -276,26 +290,6 @@ exports.sendInviteNotification = functions.firestore
     } catch (e) { console.error(e); }
   });
 
-exports.hourlyInventoryCheck = functions.pubsub
-  .schedule("0 * * * *")
-  .timeZone("America/Chicago")
-  .onRun(async (context) => {
-    const now = moment().tz("America/Chicago");
-    const currentHour = now.hour();
-    const [runoutUsers, usageUsers, reportUsers] = await Promise.all([
-      db.collection("users").where("runoutHour", "==", currentHour).get(),
-      db.collection("users").where("usageHour", "==", currentHour).get(),
-      db.collection("users").where("reportHour", "==", currentHour).get(),
-    ]);
-    const usersToCheck = new Set();
-    runoutUsers.forEach((doc) => usersToCheck.add(doc.id));
-    usageUsers.forEach((doc) => usersToCheck.add(doc.id));
-    reportUsers.forEach((doc) => usersToCheck.add(doc.id));
-    if (usersToCheck.size === 0) return null;
-    await Promise.all(Array.from(usersToCheck).map((uid) => generateUserReport(uid)));
-    return null;
-  });
-
 exports.onMemberRemoved = functions.firestore
   .document("households/{householdId}")
   .onUpdate(async (change, context) => {
@@ -320,5 +314,48 @@ exports.onMemberRemoved = functions.firestore
         }
       }));
     } catch (e) { console.error(e); }
+    return null;
+  });
+
+exports.hourlyInventoryCheck = functions.pubsub
+  .schedule("0 * * * *")
+  .timeZone("America/Chicago")
+  .onRun(async (context) => {
+    const now = moment().tz("America/Chicago");
+    const currentHour = now.hour();
+
+    const usersToProcess = new Set();
+
+    const reportUsers = await db.collection("users")
+        .where("reportHour", "==", currentHour)
+        .where("reportEnabled", "==", true)
+        .get();
+    reportUsers.forEach(doc => usersToProcess.add(doc.id));
+
+    const runoutHH = await db.collection("households")
+        .where("runoutHour", "==", currentHour)
+        .where("runoutEnabled", "==", true)
+        .get();
+    runoutHH.forEach(doc => {
+        const members = doc.data().members || [];
+        members.forEach(uid => usersToProcess.add(uid));
+    });
+
+    const usageHH = await db.collection("households")
+        .where("usageHour", "==", currentHour)
+        .where("usageEnabled", "==", true)
+        .get();
+    usageHH.forEach(doc => {
+        const members = doc.data().members || [];
+        members.forEach(uid => usersToProcess.add(uid));
+    });
+
+    if (usersToProcess.size === 0) {
+      console.log(`No notifications needed at hour ${currentHour}`);
+      return null;
+    }
+
+    await Promise.all(Array.from(usersToProcess).map((uid) => generateUserReport(uid, currentHour)));
+    
     return null;
   });

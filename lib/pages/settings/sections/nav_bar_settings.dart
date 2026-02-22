@@ -26,7 +26,7 @@ class _NavBarSettingsState extends State<NavBarSettings> {
   late Set<String> _localActiveTabIds;
   String? _defaultTabId;
 
-  final Set<String> _betaTabs = {'morning', 'night'};
+  // REMOVED: final Set<String> _betaTabs = ... (No longer needed!)
 
   @override
   void initState() {
@@ -57,12 +57,11 @@ class _NavBarSettingsState extends State<NavBarSettings> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    // Filter to only active tabs
+    // Filter to only active tabs for the startup dropdown
     final availableStartupTabs = _localOrderedTabs
         .where((tab) => _localActiveTabIds.contains(tab.id))
         .toList();
 
-    // Validate current selection
     String currentSelection = _defaultTabId ?? "";
     if (!availableStartupTabs.any((t) => t.id == currentSelection)) {
       if (availableStartupTabs.isNotEmpty) {
@@ -73,7 +72,7 @@ class _NavBarSettingsState extends State<NavBarSettings> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // --- 1. STARTUP PAGE SECTION (Standalone Tile) ---
+        // --- 1. STARTUP PAGE SECTION ---
         Padding(
           padding: const EdgeInsets.only(bottom: 10, left: 4),
           child: Text(
@@ -87,12 +86,11 @@ class _NavBarSettingsState extends State<NavBarSettings> {
           ),
         ),
 
-        // Standalone Tile (No Group Container)
         GradientSettingsTile(
           icon: Icons.home_filled,
           title: "Open App To",
           subtitle: "Select your default home page",
-          onTap: () {}, // Interaction handled by Dropdown
+          onTap: () {},
           trailing: DropdownButtonHideUnderline(
             child: DropdownButton<String>(
               value: currentSelection,
@@ -116,9 +114,7 @@ class _NavBarSettingsState extends State<NavBarSettings> {
                 );
               }).toList(),
               onChanged: (String? newValue) {
-                if (newValue != null) {
-                  _updateDefaultTab(newValue);
-                }
+                if (newValue != null) _updateDefaultTab(newValue);
               },
             ),
           ),
@@ -126,7 +122,7 @@ class _NavBarSettingsState extends State<NavBarSettings> {
 
         const SizedBox(height: 25),
 
-        // --- 2. LAYOUT SECTION (Grouped Container) ---
+        // --- 2. LAYOUT SECTION ---
         Padding(
           padding: const EdgeInsets.only(bottom: 10, left: 4),
           child: Text(
@@ -175,9 +171,8 @@ class _NavBarSettingsState extends State<NavBarSettings> {
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
                 buildDefaultDragHandles: false,
-                proxyDecorator: (child, index, animation) {
-                  return Material(color: Colors.transparent, child: child);
-                },
+                proxyDecorator: (child, index, animation) =>
+                    Material(color: Colors.transparent, child: child),
                 onReorder: (oldIndex, newIndex) {
                   setState(() {
                     if (newIndex > oldIndex) newIndex -= 1;
@@ -189,9 +184,10 @@ class _NavBarSettingsState extends State<NavBarSettings> {
                 children: _localOrderedTabs.asMap().entries.map((entry) {
                   final int index = entry.key;
                   final TabData tab = entry.value;
-
                   final bool isActive = _localActiveTabIds.contains(tab.id);
-                  final bool isBeta = _betaTabs.contains(tab.id);
+
+                  // NEW LOGIC: Use the property on the object, no hardcoded list!
+                  final bool isBeta = tab.isBeta;
 
                   String displayTitle = tab.id.toUpperCase();
                   if (isBeta) displayTitle += " (BETA)";
@@ -208,13 +204,10 @@ class _NavBarSettingsState extends State<NavBarSettings> {
                     onTap: () {
                       bool newValue = !isActive;
                       if (!newValue && _localActiveTabIds.length <= 1) return;
-
                       setState(() {
-                        if (newValue) {
-                          _localActiveTabIds.add(tab.id);
-                        } else {
-                          _localActiveTabIds.remove(tab.id);
-                        }
+                        newValue
+                            ? _localActiveTabIds.add(tab.id)
+                            : _localActiveTabIds.remove(tab.id);
                       });
                       widget.onToggle(tab.id, newValue);
                     },
@@ -228,12 +221,10 @@ class _NavBarSettingsState extends State<NavBarSettings> {
                             setState(() {
                               if (val) {
                                 _localActiveTabIds.add(tab.id);
+                              } else if (_localActiveTabIds.length > 1) {
+                                _localActiveTabIds.remove(tab.id);
                               } else {
-                                if (_localActiveTabIds.length > 1) {
-                                  _localActiveTabIds.remove(tab.id);
-                                } else {
-                                  return;
-                                }
+                                return;
                               }
                             });
                             widget.onToggle(tab.id, val);
@@ -243,11 +234,7 @@ class _NavBarSettingsState extends State<NavBarSettings> {
                         ReorderableDragStartListener(
                           index: index,
                           child: Container(
-                            padding: const EdgeInsets.only(
-                              left: 10,
-                              top: 10,
-                              bottom: 10,
-                            ),
+                            padding: const EdgeInsets.all(10),
                             color: Colors.transparent,
                             child: const Icon(
                               Icons.drag_handle,

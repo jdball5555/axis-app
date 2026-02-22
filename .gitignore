@@ -43,3 +43,12 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+
+# Secret Environment Variables
+.env
+
+# Archived Pages & Services
+lib/pages/ai_chat_page.dart
+lib/pages/ai_message_logs_page.dart
+lib/services/ai_service.dart
