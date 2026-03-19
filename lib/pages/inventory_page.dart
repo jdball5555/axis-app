@@ -1,9 +1,13 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/inventory_item.dart';
 import '../services/firestore_service.dart';
@@ -25,12 +29,16 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   late Stream<List<InventoryItem>> _inventoryStream;
+  late Stream<List<Map<String, dynamic>>> _logStream;
   Set<String> _mutedRooms = {};
 
   StreamSubscription<DocumentSnapshot>? _householdSub;
   String _currentSubscribedId = "";
   String _householdName = AxisInventoryTab.lastKnownName ?? "My Inventory";
   bool _isShared = AxisInventoryTab.lastKnownShared;
+
+  bool _isFabMenuOpen = false;
+  final ValueNotifier<bool> _showFabNotifier = ValueNotifier<bool>(true);
 
   @override
   bool get wantKeepAlive => true;
@@ -39,6 +47,7 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
   void initState() {
     super.initState();
     _inventoryStream = _db.getInventoryStream();
+    _logStream = _db.getLogStream();
     _loadMutedRooms();
     _checkForHouseholdUpdate();
   }
@@ -52,6 +61,7 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
   @override
   void dispose() {
     _householdSub?.cancel();
+    _showFabNotifier.dispose();
     super.dispose();
   }
 
@@ -99,7 +109,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
     }
   }
 
-  // --- ACTIONS ---
   void _addItem(String name, String type, String? room) {
     _db.addItem(
       InventoryItem(name: name, type: type, roomLocation: room, quantity: 0),
@@ -111,7 +120,7 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
     }
   }
 
-  void _confirmUseOne(InventoryItem item) {
+  void _confirmUseOne(InventoryItem item, List<Map<String, dynamic>> logs) {
     if (item.quantity <= 0) {
       _showSnack("None left to use!");
       return;
@@ -147,25 +156,144 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                 style: TextStyle(color: Theme.of(context).primaryColor),
               ),
               onPressed: () {
-                _db.updateQuantity(
-                  item.name,
-                  item.roomLocation,
-                  item.quantity - 1,
-                );
+                int newQty = item.quantity - 1;
+                _db.updateQuantity(item.name, item.roomLocation, newQty);
                 _db.logActivity(
                   "USED ONE",
                   item.name,
                   item.roomLocation ?? "Unknown",
                   -1,
-                  item.quantity - 1,
+                  newQty,
                 );
                 Navigator.pop(ctx);
+
+                _checkAndPromptMissingUsages(item, logs, newQty);
               },
             ),
           ],
         );
       },
     );
+  }
+
+  Future<void> _checkAndPromptMissingUsages(
+    InventoryItem item,
+    List<Map<String, dynamic>> logs,
+    int currentQty,
+  ) async {
+    if (currentQty <= 0) return;
+
+    List<DateTime> usageDates = [];
+    for (var log in logs) {
+      String logName = log['item'] ?? "";
+      String logRoom = log['room'] ?? "";
+      String action = log['action'] ?? "";
+      String timestampStr = log['timestamp'] ?? "";
+
+      bool matchesItem = logName == item.name;
+      bool matchesRoom = logRoom == item.roomLocation || logRoom == "N/A";
+      bool isUsage = action.contains("USED");
+
+      if (matchesItem && matchesRoom && isUsage) {
+        try {
+          DateTime? dt = DateTime.tryParse(timestampStr);
+          if (dt == null) {
+            List<String> parts = timestampStr.trim().split(' ');
+            if (parts.length >= 2) {
+              List<String> d = parts[0].split('-');
+              List<String> t = parts[1].split(':');
+              dt = DateTime(
+                int.parse(d[0]),
+                int.parse(d[1]),
+                int.parse(d[2]),
+                int.parse(t[0]),
+                int.parse(t[1]),
+                int.parse(t[2]),
+              );
+            }
+          }
+          if (dt != null) usageDates.add(dt);
+        } catch (_) {}
+      }
+    }
+
+    usageDates.sort();
+    if (usageDates.isEmpty) return;
+
+    DateTime lastUse = usageDates.last;
+    DateTime today = DateTime.now();
+    int daysSinceLast = today.difference(lastUse).inDays;
+
+    if (usageDates.length < 2) return;
+
+    DateTime firstUse = usageDates.first;
+    int totalSpan = lastUse.difference(firstUse).inDays;
+    int intervals = usageDates.length - 1;
+    double avgDays = intervals > 0 ? totalSpan / intervals : 1.0;
+    if (avgDays < 1) avgDays = 1.0;
+
+    if (daysSinceLast >= avgDays * 1.8) {
+      int expectedIntervals = (daysSinceLast / avgDays).round();
+      int missingCount = expectedIntervals - 1;
+
+      if (missingCount > currentQty) missingCount = currentQty;
+      if (missingCount <= 0) return;
+
+      double exactStep = daysSinceLast / expectedIntervals;
+      List<DateTime> proposed = [];
+      for (int i = 1; i <= missingCount; i++) {
+        proposed.add(lastUse.add(Duration(days: (exactStep * i).round())));
+      }
+
+      final bool? confirmAdd = await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => MissingUsagesPage(
+            item: item,
+            usageHistory: usageDates,
+            lastUse: lastUse,
+            today: today,
+            proposed: proposed,
+            missingCount: missingCount,
+            currentQty: currentQty,
+            avgDays: avgDays,
+          ),
+        ),
+      );
+
+      if (confirmAdd == true) {
+        int resultingQty = currentQty;
+        for (var date in proposed) {
+          resultingQty -= 1;
+          await _logRetroactiveUsage(item, date, resultingQty);
+        }
+        await _db.updateQuantity(item.name, item.roomLocation, resultingQty);
+        _showSnack("Logged $missingCount missed usages.");
+      }
+    }
+  }
+
+  Future<void> _logRetroactiveUsage(
+    InventoryItem item,
+    DateTime date,
+    int resultingQty,
+  ) async {
+    if (_currentSubscribedId.isEmpty) return;
+    final user = FirebaseAuth.instance.currentUser;
+    await _firestore
+        .collection('households')
+        .doc(_currentSubscribedId)
+        .collection('activity_log')
+        .add({
+          'timestamp': date.toIso8601String(),
+          'action': "USED ONE",
+          'item': item.name,
+          'room': item.roomLocation ?? "Unknown",
+          'change': -1,
+          'total': resultingQty,
+          'user': user?.displayName ?? user?.email ?? "Unknown",
+          'notes': "Suggested by Axis, Date is approximate",
+        });
   }
 
   void _confirmDelete(InventoryItem item) {
@@ -240,7 +368,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
     );
   }
 
-  // --- SMART RESTOCK LOGIC ---
   void _showQuantityDialog(InventoryItem item, List<InventoryItem> allItems) {
     final otherSources = allItems
         .where(
@@ -552,7 +679,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
     );
   }
 
-  // --- EXPORT LOGIC ---
   String _getExportTimestamp() {
     final now = DateTime.now();
     String twoDigits(int n) => n.toString().padLeft(2, "0");
@@ -635,14 +761,12 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
     );
   }
 
-  // --- EXPORT MENU (UPDATED: Side-by-Side in Landscape) ---
   void _showExportMenu() {
     final theme = Theme.of(context);
 
     showDialog(
       context: context,
       builder: (ctx) {
-        // Detect landscape mode inside builder so it updates on rotate
         final isLandscape =
             MediaQuery.of(ctx).orientation == Orientation.landscape;
 
@@ -664,7 +788,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (isLandscape)
-                  // LANDSCAPE: Row for Side-by-Side
                   Row(
                     children: [
                       Expanded(
@@ -695,7 +818,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                     ],
                   )
                 else
-                  // PORTRAIT: Column for Stacked
                   Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -775,14 +897,14 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
                     title,
                     style: TextStyle(
                       fontWeight: FontWeight.bold,
-                      fontSize: 14, // Slightly reduced for landscape fit
+                      fontSize: 14,
                       color: theme.colorScheme.onSurface,
                     ),
                   ),
                   Text(
                     subtitle,
                     style: TextStyle(
-                      fontSize: 10, // Slightly reduced for landscape fit
+                      fontSize: 10,
                       color: theme.colorScheme.onSurface.withOpacity(0.7),
                     ),
                   ),
@@ -796,66 +918,6 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
           ],
         ),
       ),
-    );
-  }
-
-  void _showAddDialog(List<String> rooms, List<String> existingItemNames) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor: Theme.of(context).cardColor,
-          title: Text(
-            "Add to Inventory",
-            style: TextStyle(color: Theme.of(context).colorScheme.onSurface),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: Icon(
-                  Icons.meeting_room,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                title: Text(
-                  "Add Room",
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurface,
-                  ),
-                ),
-                onTap: () {
-                  Navigator.pop(context);
-                  _showNameInputDialog(
-                    isRoom: true,
-                    rooms: rooms,
-                    existingItemNames: existingItemNames,
-                  );
-                },
-              ),
-              ListTile(
-                leading: Icon(
-                  Icons.category,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                title: Text(
-                  "Add Item",
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurface,
-                  ),
-                ),
-                onTap: () {
-                  Navigator.pop(context);
-                  _showNameInputDialog(
-                    isRoom: false,
-                    rooms: rooms,
-                    existingItemNames: existingItemNames,
-                  );
-                },
-              ),
-            ],
-          ),
-        );
-      },
     );
   }
 
@@ -1075,349 +1137,1277 @@ class _AxisInventoryTabState extends State<AxisInventoryTab>
     final theme = Theme.of(context);
     final isLandscape =
         MediaQuery.of(context).orientation == Orientation.landscape;
-
-    // --- UPDATED TITLE ALIGNMENT ---
     final topPadding = isLandscape ? 20.0 : 132.0;
-
     final currentId = _db.currentHouseholdId;
 
     return StreamBuilder<List<InventoryItem>>(
       stream: _inventoryStream,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            backgroundColor: Colors.transparent,
-            body: Center(child: CircularProgressIndicator()),
-          );
-        }
+      builder: (context, invSnapshot) {
+        return StreamBuilder<List<Map<String, dynamic>>>(
+          stream: _logStream,
+          builder: (context, logSnapshot) {
+            if (invSnapshot.connectionState == ConnectionState.waiting ||
+                logSnapshot.connectionState == ConnectionState.waiting) {
+              return const Scaffold(
+                backgroundColor: Colors.transparent,
+                body: Center(child: CircularProgressIndicator()),
+              );
+            }
 
-        final inventoryList = snapshot.data ?? [];
-        final roomList = inventoryList
-            .where((element) => element.type == "Room")
-            .toList();
-        final roomNames = roomList.map((e) => e.name).toList();
-        final existingItemNames = inventoryList
-            .where((i) => i.type == 'Item')
-            .map((i) => i.name)
-            .toSet()
-            .toList();
+            final inventoryList = invSnapshot.data ?? [];
+            final logs = logSnapshot.data ?? [];
 
-        return Scaffold(
-          backgroundColor: Colors.transparent,
-          floatingActionButton: FloatingActionButton(
-            onPressed: () => _showAddDialog(roomNames, existingItemNames),
-            backgroundColor: theme.colorScheme.primary,
-            child: const Icon(Icons.add, color: Colors.white),
-          ),
-          body: Padding(
-            padding: EdgeInsets.fromLTRB(20, topPadding, 20, 20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    // --- TITLE ROW (Flexible) ---
-                    Expanded(
-                      child: Row(
+            final roomList = inventoryList
+                .where((element) => element.type == "Room")
+                .toList();
+            final roomNames = roomList.map((e) => e.name).toList();
+            final existingItemNames = inventoryList
+                .where((i) => i.type == 'Item')
+                .map((i) => i.name)
+                .toSet()
+                .toList();
+
+            return Scaffold(
+              backgroundColor: Colors.transparent,
+              floatingActionButton: ValueListenableBuilder<bool>(
+                valueListenable: _showFabNotifier,
+                builder: (context, isVisible, child) {
+                  return AnimatedSlide(
+                    duration: const Duration(milliseconds: 250),
+                    offset: isVisible ? Offset.zero : const Offset(0, 2),
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 250),
+                      opacity: isVisible ? 1.0 : 0.0,
+                      child: Column(
                         mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
-                          Flexible(
-                            child: Text(
-                              _householdName,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: theme.colorScheme.onSurface,
-                                fontSize: 28,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 1.2,
+                          if (_isFabMenuOpen) ...[
+                            FloatingActionButton.extended(
+                              heroTag: 'add_room_fab',
+                              onPressed: () {
+                                setState(() => _isFabMenuOpen = false);
+                                _showNameInputDialog(
+                                  isRoom: true,
+                                  rooms: roomNames,
+                                  existingItemNames: existingItemNames,
+                                );
+                              },
+                              backgroundColor: const Color(0xFF1E1E1E),
+                              icon: const Icon(
+                                Icons.meeting_room,
+                                color: Color(0xFF00C897),
                               ),
+                              label: const Text(
+                                "Add Room",
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            FloatingActionButton.extended(
+                              heroTag: 'add_item_fab',
+                              onPressed: () {
+                                setState(() => _isFabMenuOpen = false);
+                                _showNameInputDialog(
+                                  isRoom: false,
+                                  rooms: roomNames,
+                                  existingItemNames: existingItemNames,
+                                );
+                              },
+                              backgroundColor: const Color(0xFF1E1E1E),
+                              icon: const Icon(
+                                Icons.category,
+                                color: Color(0xFF00C897),
+                              ),
+                              label: const Text(
+                                "Add Item",
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 15),
+                          ],
+                          FloatingActionButton(
+                            heroTag: 'inventory_fab_main',
+                            onPressed: () => setState(
+                              () => _isFabMenuOpen = !_isFabMenuOpen,
+                            ),
+                            backgroundColor: theme.colorScheme.primary,
+                            child: Icon(
+                              _isFabMenuOpen ? Icons.close : Icons.add,
+                              color: Colors.black,
                             ),
                           ),
-                          if (_isShared) ...[
-                            const SizedBox(width: 10),
-                            GestureDetector(
-                              onTap: () => _showMembersDialog(currentId!),
-                              child: Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: theme.colorScheme.primary.withOpacity(
-                                    0.2,
-                                  ),
-                                  shape: BoxShape.circle,
-                                ),
-                                child: Icon(
-                                  Icons.group,
-                                  size: 20,
-                                  color: theme.colorScheme.primary,
-                                ),
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    // --- BUTTON ROW (Fixed) ---
+                  );
+                },
+              ),
+              body: Padding(
+                padding: EdgeInsets.fromLTRB(20, topPadding, 20, 0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                     Row(
-                      mainAxisSize: MainAxisSize.min,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        IconButton(
-                          icon: Icon(
-                            Icons.history,
-                            color: theme.iconTheme.color,
-                          ),
-                          onPressed: () async => await Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => const ActivityLogPage(),
-                            ),
+                        Expanded(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  _householdName,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: theme.colorScheme.onSurface,
+                                    fontSize: 28,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 1.2,
+                                  ),
+                                ),
+                              ),
+                              if (_isShared) ...[
+                                const SizedBox(width: 10),
+                                GestureDetector(
+                                  onTap: () => _showMembersDialog(currentId!),
+                                  child: Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: BoxDecoration(
+                                      color: theme.colorScheme.primary
+                                          .withOpacity(0.2),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(
+                                      Icons.group,
+                                      size: 20,
+                                      color: theme.colorScheme.primary,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
                         ),
-                        IconButton(
-                          onPressed: () => _showExportMenu(),
-                          icon: Icon(
-                            Icons.download,
-                            color: theme.colorScheme.primary,
-                          ),
+                        const SizedBox(width: 8),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: Icon(
+                                Icons.history,
+                                color: theme.iconTheme.color,
+                              ),
+                              onPressed: () async => await Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => const ActivityLogPage(),
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              onPressed: () => _showExportMenu(),
+                              icon: Icon(
+                                Icons.download,
+                                color: theme.colorScheme.primary,
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
-                  ],
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  "Track your items",
-                  style: TextStyle(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    fontSize: 14,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Expanded(
-                  child: inventoryList.isEmpty
-                      ? Center(
-                          child: Text(
-                            "Click + to add",
-                            style: TextStyle(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        )
-                      : LayoutBuilder(
-                          builder: (context, constraints) {
-                            int crossAxisCount = constraints.maxWidth > 600
-                                ? 2
-                                : 1;
-                            return ListView.builder(
-                              padding: EdgeInsets.zero,
-                              itemCount: roomList.length,
-                              itemBuilder: (context, index) {
-                                final room = roomList[index];
-                                final roomItems = inventoryList
-                                    .where(
-                                      (item) =>
-                                          item.type == "Item" &&
-                                          item.roomLocation == room.name,
-                                    )
-                                    .toList();
-                                final isNotifActive = !_mutedRooms.contains(
-                                  room.name,
-                                );
+                    const SizedBox(height: 5),
+                    Text(
+                      "Track your items",
+                      style: TextStyle(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontSize: 14,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Expanded(
+                      child: inventoryList.isEmpty
+                          ? Center(
+                              child: Text(
+                                "Click + to add",
+                                style: TextStyle(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            )
+                          : LayoutBuilder(
+                              builder: (context, constraints) {
+                                // INCREASED TO 420 TO PREVENT SQUISHING / EARLY JUMP TO 4 COLUMNS
+                                int crossAxisCount =
+                                    (constraints.maxWidth / 420).floor();
+                                if (crossAxisCount < 1) crossAxisCount = 1;
 
-                                return Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    GestureDetector(
-                                      onLongPress: () => _confirmDelete(room),
-                                      child: Container(
-                                        margin: const EdgeInsets.only(
-                                          top: 15,
-                                          bottom: 5,
-                                        ),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 10,
-                                          vertical: 8,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: theme.dividerColor.withOpacity(
-                                            0.1,
-                                          ),
-                                          borderRadius: BorderRadius.circular(
-                                            8,
-                                          ),
-                                          border: Border.all(
-                                            color: theme.dividerColor,
-                                          ),
-                                        ),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Icon(
-                                              Icons.meeting_room,
-                                              color: theme.colorScheme.primary,
-                                              size: 20,
-                                            ),
-                                            const SizedBox(width: 8),
-                                            Text(
-                                              room.name,
-                                              style: TextStyle(
-                                                color:
-                                                    theme.colorScheme.onSurface,
-                                                fontSize: 18,
-                                                fontWeight: FontWeight.bold,
-                                              ),
-                                            ),
-                                            if (isNotifActive)
-                                              Padding(
-                                                padding: const EdgeInsets.only(
-                                                  left: 8.0,
-                                                ),
-                                                child: Icon(
-                                                  Icons.notifications_active,
-                                                  size: 14,
-                                                  color: theme
-                                                      .colorScheme
-                                                      .primary
-                                                      .withOpacity(0.7),
-                                                ),
-                                              ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                    if (roomItems.isEmpty)
-                                      Padding(
-                                        padding: const EdgeInsets.only(
-                                          left: 20,
-                                          bottom: 10,
-                                        ),
-                                        child: Text(
-                                          "No items yet.",
-                                          style: TextStyle(
-                                            color: theme
-                                                .colorScheme
-                                                .onSurfaceVariant,
-                                            fontStyle: FontStyle.italic,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                      ),
-                                    Wrap(
-                                      spacing: 10,
-                                      runSpacing: 10,
-                                      children: roomItems.map((item) {
-                                        double cardWidth = crossAxisCount == 1
-                                            ? double.infinity
-                                            : (constraints.maxWidth - 10) / 2;
-                                        return SizedBox(
-                                          width: cardWidth,
-                                          child: GestureDetector(
+                                return NotificationListener<
+                                  UserScrollNotification
+                                >(
+                                  onNotification: (notification) {
+                                    if (notification.direction ==
+                                        ScrollDirection.reverse) {
+                                      if (_showFabNotifier.value) {
+                                        _showFabNotifier.value = false;
+                                        if (_isFabMenuOpen)
+                                          setState(
+                                            () => _isFabMenuOpen = false,
+                                          );
+                                      }
+                                    } else if (notification.direction ==
+                                        ScrollDirection.forward) {
+                                      if (!_showFabNotifier.value) {
+                                        _showFabNotifier.value = true;
+                                      }
+                                    }
+                                    return true;
+                                  },
+                                  child: ListView.builder(
+                                    padding: const EdgeInsets.only(bottom: 80),
+                                    itemCount: roomList.length,
+                                    itemBuilder: (context, index) {
+                                      final room = roomList[index];
+                                      final roomItems = inventoryList
+                                          .where(
+                                            (item) =>
+                                                item.type == "Item" &&
+                                                item.roomLocation == room.name,
+                                          )
+                                          .toList();
+                                      final isNotifActive = !_mutedRooms
+                                          .contains(room.name);
+
+                                      List<List<InventoryItem>> columns =
+                                          List.generate(
+                                            crossAxisCount,
+                                            (_) => [],
+                                          );
+                                      for (
+                                        int i = 0;
+                                        i < roomItems.length;
+                                        i++
+                                      ) {
+                                        columns[i % crossAxisCount].add(
+                                          roomItems[i],
+                                        );
+                                      }
+
+                                      return Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          GestureDetector(
                                             onLongPress: () =>
-                                                _confirmDelete(item),
+                                                _confirmDelete(room),
                                             child: Container(
+                                              margin: const EdgeInsets.only(
+                                                top: 35,
+                                                bottom: 16,
+                                              ),
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 10,
+                                                    vertical: 8,
+                                                  ),
                                               decoration: BoxDecoration(
-                                                color: theme.cardColor,
+                                                color: theme.dividerColor
+                                                    .withOpacity(0.1),
                                                 borderRadius:
-                                                    BorderRadius.circular(15),
+                                                    BorderRadius.circular(8),
                                                 border: Border.all(
                                                   color: theme.dividerColor,
                                                 ),
                                               ),
-                                              child: ListTile(
-                                                leading: Container(
-                                                  width: 40,
-                                                  height: 40,
-                                                  alignment: Alignment.center,
-                                                  decoration: BoxDecoration(
-                                                    color: theme.dividerColor
-                                                        .withOpacity(0.2),
-                                                    shape: BoxShape.circle,
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Icon(
+                                                    Icons.meeting_room,
+                                                    color: theme
+                                                        .colorScheme
+                                                        .primary,
+                                                    size: 20,
                                                   ),
-                                                  child: Text(
-                                                    "${item.quantity}",
+                                                  const SizedBox(width: 8),
+                                                  Text(
+                                                    room.name,
                                                     style: TextStyle(
                                                       color: theme
                                                           .colorScheme
-                                                          .primary,
+                                                          .onSurface,
+                                                      fontSize: 18,
                                                       fontWeight:
                                                           FontWeight.bold,
-                                                      fontSize: 16,
                                                     ),
                                                   ),
-                                                ),
-                                                title: Row(
-                                                  children: [
-                                                    Icon(
-                                                      Icons.category,
-                                                      size: 16,
-                                                      color: theme
-                                                          .colorScheme
-                                                          .onSurfaceVariant,
-                                                    ),
-                                                    const SizedBox(width: 8),
-                                                    Expanded(
-                                                      child: Text(
-                                                        item.name,
-                                                        style: TextStyle(
-                                                          color: theme
-                                                              .colorScheme
-                                                              .onSurface,
-                                                        ),
-                                                        overflow: TextOverflow
-                                                            .ellipsis,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                                trailing: Row(
-                                                  mainAxisSize:
-                                                      MainAxisSize.min,
-                                                  children: [
-                                                    IconButton(
-                                                      icon: Icon(
-                                                        Icons.remove_circle,
-                                                        color: theme
-                                                            .colorScheme
-                                                            .onSurfaceVariant,
-                                                      ),
-                                                      onPressed: () =>
-                                                          _confirmUseOne(item),
-                                                      tooltip: "Use One",
-                                                    ),
-                                                    IconButton(
-                                                      icon: Icon(
-                                                        Icons.add,
-                                                        color: theme
-                                                            .colorScheme
-                                                            .onSurfaceVariant,
-                                                      ),
-                                                      onPressed: () =>
-                                                          _showQuantityDialog(
-                                                            item,
-                                                            inventoryList,
+                                                  if (isNotifActive)
+                                                    Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                            left: 8.0,
                                                           ),
+                                                      child: Icon(
+                                                        Icons
+                                                            .notifications_active,
+                                                        size: 14,
+                                                        color: theme
+                                                            .colorScheme
+                                                            .primary
+                                                            .withOpacity(0.7),
+                                                      ),
                                                     ),
-                                                  ],
-                                                ),
+                                                ],
                                               ),
                                             ),
                                           ),
-                                        );
-                                      }).toList(),
-                                    ),
-                                  ],
+                                          if (roomItems.isEmpty)
+                                            Padding(
+                                              padding: const EdgeInsets.only(
+                                                left: 20,
+                                                bottom: 10,
+                                              ),
+                                              child: Text(
+                                                "No items yet.",
+                                                style: TextStyle(
+                                                  color: theme
+                                                      .colorScheme
+                                                      .onSurfaceVariant,
+                                                  fontStyle: FontStyle.italic,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                            )
+                                          else
+                                            Row(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: List.generate(crossAxisCount, (
+                                                colIndex,
+                                              ) {
+                                                return Expanded(
+                                                  child: Padding(
+                                                    padding: EdgeInsets.only(
+                                                      right:
+                                                          colIndex <
+                                                              crossAxisCount - 1
+                                                          ? 12.0
+                                                          : 0.0,
+                                                    ),
+                                                    child: Column(
+                                                      crossAxisAlignment:
+                                                          CrossAxisAlignment
+                                                              .start,
+                                                      children: columns[colIndex].map((
+                                                        item,
+                                                      ) {
+                                                        return Padding(
+                                                          padding:
+                                                              const EdgeInsets.only(
+                                                                bottom: 12.0,
+                                                              ),
+                                                          child: _InventoryItemCard(
+                                                            item: item,
+                                                            logs: logs,
+                                                            onUseOne: () =>
+                                                                _confirmUseOne(
+                                                                  item,
+                                                                  logs,
+                                                                ),
+                                                            onRestock: () =>
+                                                                _showQuantityDialog(
+                                                                  item,
+                                                                  inventoryList,
+                                                                ),
+                                                            onDelete: () =>
+                                                                _confirmDelete(
+                                                                  item,
+                                                                ),
+                                                          ),
+                                                        );
+                                                      }).toList(),
+                                                    ),
+                                                  ),
+                                                );
+                                              }),
+                                            ),
+                                        ],
+                                      );
+                                    },
+                                  ),
                                 );
                               },
-                            );
-                          },
-                        ),
+                            ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
     );
   }
+}
+
+// ==========================================
+// FULL PAGE: SMART MISSING USAGES PROMPT
+// ==========================================
+class MissingUsagesPage extends StatefulWidget {
+  final InventoryItem item;
+  final List<DateTime> usageHistory;
+  final DateTime lastUse;
+  final DateTime today;
+  final List<DateTime> proposed;
+  final int missingCount;
+  final int currentQty;
+  final double avgDays;
+
+  const MissingUsagesPage({
+    super.key,
+    required this.item,
+    required this.usageHistory,
+    required this.lastUse,
+    required this.today,
+    required this.proposed,
+    required this.missingCount,
+    required this.currentQty,
+    required this.avgDays,
+  });
+
+  @override
+  State<MissingUsagesPage> createState() => _MissingUsagesPageState();
+}
+
+class _MissingUsagesPageState extends State<MissingUsagesPage> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+
+    List<DateTime> allDates = [
+      ...widget.usageHistory,
+      ...widget.proposed,
+      widget.today,
+    ];
+    allDates.sort();
+
+    return Scaffold(
+      backgroundColor: theme.scaffoldBackgroundColor,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        leading: const BackButton(color: Color(0xFF00C897)),
+      ),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 30.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.auto_awesome,
+                      color: Color(0xFF00C897),
+                      size: 28,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        "Axis found a discrepancy.",
+                        style: TextStyle(
+                          color: theme.colorScheme.onSurface,
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 15),
+                Text(
+                  "It's been ${widget.today.difference(widget.lastUse).inDays} days since you last logged '${widget.item.name}', but you usually use it every ${widget.avgDays.toStringAsFixed(1)} days.",
+                  style: TextStyle(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    fontSize: 16,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  "Did you forget to log ${widget.missingCount} usage(s)?",
+                  style: const TextStyle(
+                    color: Colors.deepPurpleAccent,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          Expanded(
+            child: Center(
+              child: SingleChildScrollView(
+                controller: _scrollController,
+                scrollDirection: isLandscape ? Axis.horizontal : Axis.vertical,
+                padding: const EdgeInsets.all(40),
+                child: CustomPaint(
+                  painter: MissingGraphPainter(
+                    allDates: allDates,
+                    proposed: widget.proposed,
+                    lastUse: widget.lastUse,
+                    today: widget.today,
+                    mainColor: theme.colorScheme.primary,
+                    proposedColor: Colors.deepPurpleAccent,
+                    textColor: theme.colorScheme.onSurface,
+                    isHorizontal: isLandscape,
+                  ),
+                  size: isLandscape
+                      ? Size(allDates.length * 120.0, 300)
+                      : Size(300, allDates.length * 120.0),
+                ),
+              ),
+            ),
+          ),
+
+          Padding(
+            padding: const EdgeInsets.all(30.0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 18),
+                      side: BorderSide(
+                        color: theme.colorScheme.onSurfaceVariant.withOpacity(
+                          0.5,
+                        ),
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                    ),
+                    child: Text(
+                      "No, just today",
+                      style: TextStyle(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 15),
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.deepPurpleAccent,
+                      padding: const EdgeInsets.symmetric(vertical: 18),
+                      side: const BorderSide(
+                        color: Colors.deepPurpleAccent,
+                        width: 1.5,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                    ),
+                    child: Text(
+                      "Yes, log missed (-${widget.missingCount})",
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class MissingGraphPainter extends CustomPainter {
+  final List<DateTime> allDates;
+  final List<DateTime> proposed;
+  final DateTime lastUse;
+  final DateTime today;
+  final Color mainColor;
+  final Color proposedColor;
+  final Color textColor;
+  final bool isHorizontal;
+
+  MissingGraphPainter({
+    required this.allDates,
+    required this.proposed,
+    required this.lastUse,
+    required this.today,
+    required this.mainColor,
+    required this.proposedColor,
+    required this.textColor,
+    required this.isHorizontal,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (allDates.length < 2) return;
+
+    final Paint linePaint = Paint()
+      ..color = textColor.withOpacity(0.2)
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    final Paint borderPaint = Paint()
+      ..color = textColor.withOpacity(0.1)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10;
+
+    final textStyle = TextStyle(
+      color: textColor,
+      fontSize: 12,
+      fontWeight: FontWeight.bold,
+    );
+
+    final subTextStyle = TextStyle(
+      color: textColor.withOpacity(0.6),
+      fontSize: 10,
+    );
+
+    double step = isHorizontal
+        ? size.width / (allDates.length)
+        : size.height / (allDates.length);
+
+    if (step < 80) step = 80;
+
+    for (int i = 0; i < allDates.length; i++) {
+      final double progress = i * step;
+      final Offset center = isHorizontal
+          ? Offset(progress + 40, size.height / 2)
+          : Offset(size.width / 2, progress + 40);
+
+      bool isProposed = proposed.contains(allDates[i]);
+      Color dotColor = isProposed ? proposedColor : mainColor;
+
+      if (i < allDates.length - 1) {
+        final double nextProgress = (i + 1) * step;
+        final Offset nextCenter = isHorizontal
+            ? Offset(nextProgress + 40, size.height / 2)
+            : Offset(size.width / 2, nextProgress + 40);
+
+        canvas.drawLine(center, nextCenter, linePaint);
+
+        final int daysDiff = allDates[i + 1].difference(allDates[i]).inDays;
+        final String gapText = "$daysDiff days";
+
+        final TextSpan span = TextSpan(text: gapText, style: subTextStyle);
+        final TextPainter tp = TextPainter(
+          text: span,
+          textDirection: ui.TextDirection.ltr,
+        );
+        tp.layout();
+
+        final Offset midPoint = Offset(
+          (center.dx + nextCenter.dx) / 2,
+          (center.dy + nextCenter.dy) / 2,
+        );
+
+        final Offset textOffset = isHorizontal
+            ? Offset(midPoint.dx - (tp.width / 2), midPoint.dy - 20)
+            : Offset(midPoint.dx + 15, midPoint.dy - (tp.height / 2));
+
+        tp.paint(canvas, textOffset);
+      }
+
+      canvas.drawCircle(center, 8, borderPaint);
+      canvas.drawCircle(center, 5, Paint()..color = dotColor);
+
+      String prefix = "";
+      if (allDates[i] == lastUse) prefix = "Last Log: ";
+      if (allDates[i] == today) prefix = "Today: ";
+
+      final String dateText = prefix + DateFormat('MMM d').format(allDates[i]);
+      final TextSpan dSpan = TextSpan(
+        text: dateText,
+        style: textStyle.copyWith(
+          color: isProposed ? proposedColor : textColor,
+        ),
+      );
+
+      final TextPainter dTp = TextPainter(
+        text: dSpan,
+        textDirection: ui.TextDirection.ltr,
+      );
+      dTp.layout();
+
+      final Offset labelOffset = isHorizontal
+          ? Offset(center.dx - (dTp.width / 2), center.dy + 20)
+          : Offset(center.dx - dTp.width - 20, center.dy - (dTp.height / 2));
+
+      dTp.paint(canvas, labelOffset);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// --- NEW EXPANDABLE CARD WITH STATS ---
+class _InventoryItemCard extends StatefulWidget {
+  final InventoryItem item;
+  final List<Map<String, dynamic>> logs;
+  final VoidCallback onUseOne;
+  final VoidCallback onRestock;
+  final VoidCallback onDelete;
+
+  const _InventoryItemCard({
+    required this.item,
+    required this.logs,
+    required this.onUseOne,
+    required this.onRestock,
+    required this.onDelete,
+  });
+
+  @override
+  State<_InventoryItemCard> createState() => _InventoryItemCardState();
+}
+
+class _InventoryItemCardState extends State<_InventoryItemCard> {
+  bool _isExpanded = false;
+
+  DateTime? _parseDate(String dateStr) {
+    try {
+      return DateTime.parse(dateStr);
+    } catch (_) {
+      try {
+        List<String> parts = dateStr.trim().split(' ');
+        if (parts.length >= 2) {
+          List<String> d = parts[0].split('-');
+          List<String> t = parts[1].split(':');
+          return DateTime(
+            int.parse(d[0]),
+            int.parse(d[1]),
+            int.parse(d[2]),
+            int.parse(t[0]),
+            int.parse(t[1]),
+            int.parse(t[2]),
+          );
+        }
+        return null;
+      } catch (e) {
+        return null;
+      }
+    }
+  }
+
+  String _formatSimpleDate(DateTime d) {
+    return "${d.month}/${d.day}/${d.year}";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final now = DateTime.now();
+
+    // Calculate stats identical to stats_page.dart
+    List<DateTime> usageDates = [];
+    for (var log in widget.logs) {
+      String logName = log['item'] ?? "";
+      String logRoom = log['room'] ?? "";
+      String action = log['action'] ?? "";
+      String timestampStr = log['timestamp'] ?? "";
+
+      bool matchesItem = logName == widget.item.name;
+      bool matchesRoom =
+          logRoom == widget.item.roomLocation || logRoom == "N/A";
+      bool isUsage = action.contains("USED");
+
+      if (matchesItem && matchesRoom && isUsage) {
+        DateTime? dt = _parseDate(timestampStr);
+        if (dt != null) usageDates.add(dt);
+      }
+    }
+    usageDates.sort();
+
+    bool hasEnough = usageDates.length >= 2;
+    double avgDays = 0.0;
+    int daysLeft = 0;
+    DateTime? runoutDate;
+
+    if (hasEnough) {
+      DateTime firstUse = usageDates.first;
+      DateTime lastUse = usageDates.last;
+      int totalSpan = lastUse.difference(firstUse).inDays;
+      if (totalSpan == 0) totalSpan = 1;
+      int intervals = usageDates.length - 1;
+      if (intervals < 1) intervals = 1;
+      avgDays = totalSpan / intervals;
+
+      double stockDuration = (widget.item.quantity + 1) * avgDays;
+      int daysSinceLast = now.difference(lastUse).inDays;
+      daysLeft = (stockDuration - daysSinceLast).round();
+      runoutDate = now.add(Duration(days: daysLeft));
+    }
+
+    // Determine visual status
+    Color statusColor;
+    String bigText;
+    String subText;
+
+    if (hasEnough) {
+      if (daysLeft < 0) {
+        statusColor = Colors.redAccent;
+        bigText = "Due";
+        subText = "Overdue";
+      } else if (daysLeft < 7) {
+        statusColor = Colors.redAccent;
+        bigText = "$daysLeft";
+        subText = "Days";
+      } else if (daysLeft < 30) {
+        statusColor = Colors.orangeAccent;
+        bigText = "$daysLeft";
+        subText = "Days";
+      } else {
+        statusColor = theme.colorScheme.primary;
+        bigText = "$daysLeft";
+        subText = "Days";
+      }
+    } else {
+      statusColor = theme.colorScheme.onSurfaceVariant.withOpacity(0.3);
+      bigText = "?";
+      subText = "N/A";
+    }
+
+    return GestureDetector(
+      onLongPress: widget.onDelete,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        decoration: BoxDecoration(
+          color: theme.cardColor,
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(color: theme.dividerColor),
+        ),
+        child: Column(
+          children: [
+            // Main Tile Row
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  // Leading Stats Indicators
+                  Row(
+                    children: [
+                      Container(
+                        width: 52,
+                        height: 52,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(color: statusColor, width: 2),
+                          color: statusColor.withOpacity(0.1),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              bigText,
+                              style: TextStyle(
+                                color: statusColor,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                            if (subText != "N/A" && bigText != "Due")
+                              Text(
+                                subText,
+                                style: TextStyle(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                  fontSize: 9,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      // Stock Quantity Badge
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            "Stock",
+                            style: TextStyle(
+                              fontSize: 9,
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                          Text(
+                            "${widget.item.quantity}",
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 14,
+                              color: theme.colorScheme.onSurface,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(width: 12),
+                  // Clickable Item Name Area
+                  Expanded(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        setState(() {
+                          _isExpanded = !_isExpanded;
+                        });
+                      },
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              widget.item.name,
+                              style: TextStyle(
+                                color: theme.colorScheme.onSurface,
+                                fontWeight: FontWeight.w500,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Icon(
+                            _isExpanded
+                                ? Icons.keyboard_arrow_up
+                                : Icons.keyboard_arrow_down,
+                            size: 16,
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  // Trailing Action Buttons
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: Icon(
+                          Icons.remove_circle,
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                        onPressed: widget.onUseOne,
+                        tooltip: "Use One",
+                      ),
+                      IconButton(
+                        icon: Icon(
+                          Icons.add,
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                        onPressed: widget.onRestock,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            // Expanded Information Area
+            if (_isExpanded) ...[
+              Divider(height: 1, color: theme.dividerColor.withOpacity(0.5)),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: theme.dividerColor.withOpacity(0.05),
+                  borderRadius: const BorderRadius.only(
+                    bottomLeft: Radius.circular(15),
+                    bottomRight: Radius.circular(15),
+                  ),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (hasEnough) ...[
+                            Text(
+                              "Rate: 1 every ${avgDays.toStringAsFixed(1)} days",
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              "Empty Date: ${_formatSimpleDate(runoutDate!)}",
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: statusColor,
+                              ),
+                            ),
+                          ] else
+                            Text(
+                              "Needs 2+ usages for stats (Used ${usageDates.length})",
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontStyle: FontStyle.italic,
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: Icon(
+                        Icons.show_chart,
+                        color: theme.colorScheme.primary,
+                      ),
+                      tooltip: "View History Graph",
+                      onPressed: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => ItemGraphPage(
+                              itemName: widget.item.name,
+                              usageHistory: usageDates,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ==========================================
+// MOVED GRAPH LOGIC BELOW
+// ==========================================
+
+class ItemGraphPage extends StatefulWidget {
+  final String itemName;
+  final List<DateTime> usageHistory;
+
+  const ItemGraphPage({
+    super.key,
+    required this.itemName,
+    required this.usageHistory,
+  });
+
+  @override
+  State<ItemGraphPage> createState() => _ItemGraphPageState();
+}
+
+class _ItemGraphPageState extends State<ItemGraphPage> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isLandscape =
+        MediaQuery.of(context).orientation == Orientation.landscape;
+
+    final sortedData = List<DateTime>.from(widget.usageHistory)..sort();
+
+    return Scaffold(
+      backgroundColor: theme.scaffoldBackgroundColor,
+      appBar: AppBar(
+        title: Text(widget.itemName),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        iconTheme: IconThemeData(color: theme.colorScheme.onSurface),
+        titleTextStyle: TextStyle(
+          color: theme.colorScheme.onSurface,
+          fontSize: 20,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      body: Center(
+        child: sortedData.isEmpty
+            ? Text(
+                "No Data",
+                style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
+              )
+            : SingleChildScrollView(
+                controller: _scrollController,
+                scrollDirection: isLandscape ? Axis.horizontal : Axis.vertical,
+                padding: const EdgeInsets.all(40),
+                child: CustomPaint(
+                  painter: GraphTimelinePainter(
+                    dates: sortedData,
+                    color: theme.colorScheme.primary,
+                    textColor: theme.colorScheme.onSurface,
+                    lineColor: theme.dividerColor,
+                    isHorizontal: isLandscape,
+                  ),
+                  size: isLandscape
+                      ? Size(sortedData.length * 120.0, 300)
+                      : Size(300, sortedData.length * 120.0),
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+class GraphTimelinePainter extends CustomPainter {
+  final List<DateTime> dates;
+  final Color color;
+  final Color textColor;
+  final Color lineColor;
+  final bool isHorizontal;
+
+  GraphTimelinePainter({
+    required this.dates,
+    required this.color,
+    required this.textColor,
+    required this.lineColor,
+    required this.isHorizontal,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint linePaint = Paint()
+      ..color = lineColor
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
+
+    final Paint dotPaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+
+    final Paint borderPaint = Paint()
+      ..color = textColor.withOpacity(0.1)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10;
+
+    final textStyle = TextStyle(
+      color: textColor,
+      fontSize: 12,
+      fontWeight: FontWeight.bold,
+    );
+
+    final subTextStyle = TextStyle(
+      color: textColor.withOpacity(0.6),
+      fontSize: 10,
+    );
+
+    double step = isHorizontal
+        ? size.width / (dates.length)
+        : size.height / (dates.length);
+
+    if (step < 80) step = 80;
+
+    for (int i = 0; i < dates.length; i++) {
+      final double progress = i * step;
+      final Offset center = isHorizontal
+          ? Offset(progress + 40, size.height / 2)
+          : Offset(size.width / 2, progress + 40);
+
+      if (i < dates.length - 1) {
+        final double nextProgress = (i + 1) * step;
+        final Offset nextCenter = isHorizontal
+            ? Offset(nextProgress + 40, size.height / 2)
+            : Offset(size.width / 2, nextProgress + 40);
+
+        canvas.drawLine(center, nextCenter, linePaint);
+
+        final int daysDiff = dates[i + 1].difference(dates[i]).inDays;
+        final String gapText = "$daysDiff days";
+
+        final TextSpan span = TextSpan(text: gapText, style: subTextStyle);
+        final TextPainter tp = TextPainter(
+          text: span,
+          textDirection: ui.TextDirection.ltr,
+        );
+        tp.layout();
+
+        final Offset midPoint = Offset(
+          (center.dx + nextCenter.dx) / 2,
+          (center.dy + nextCenter.dy) / 2,
+        );
+
+        final Offset textOffset = isHorizontal
+            ? Offset(midPoint.dx - (tp.width / 2), midPoint.dy - 20)
+            : Offset(midPoint.dx + 15, midPoint.dy - (tp.height / 2));
+
+        tp.paint(canvas, textOffset);
+      }
+
+      canvas.drawCircle(center, 8, borderPaint);
+      canvas.drawCircle(center, 5, dotPaint);
+
+      final String dateText = DateFormat('MMM d').format(dates[i]);
+      final TextSpan dSpan = TextSpan(text: dateText, style: textStyle);
+      final TextPainter dTp = TextPainter(
+        text: dSpan,
+        textDirection: ui.TextDirection.ltr,
+      );
+      dTp.layout();
+
+      final Offset labelOffset = isHorizontal
+          ? Offset(center.dx - (dTp.width / 2), center.dy + 20)
+          : Offset(center.dx - dTp.width - 20, center.dy - (dTp.height / 2));
+
+      dTp.paint(canvas, labelOffset);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }

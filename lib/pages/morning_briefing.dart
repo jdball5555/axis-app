@@ -28,6 +28,7 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
   String _weatherTemp = "--°";
   String _weatherDesc = "Loading...";
   String _dailyHiLow = "";
+  int _dailyPrecipChance = 0;
   IconData _weatherIcon = Icons.wb_sunny;
   Color _weatherIconColor = Colors.orangeAccent;
   List<Map<String, dynamic>> _hourlyForecast = [];
@@ -42,7 +43,7 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
   Future<void> _fetchWeather() async {
     try {
       const url =
-          'https://api.open-meteo.com/v1/forecast?latitude=33.1507&longitude=-96.8236&current_weather=true&hourly=temperature_2m,precipitation_probability,weathercode&daily=temperature_2m_max,temperature_2m_min&temperature_unit=fahrenheit&timezone=America%2FChicago';
+          'https://api.open-meteo.com/v1/forecast?latitude=33.1507&longitude=-96.8236&current_weather=true&hourly=temperature_2m,precipitation_probability,weathercode&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&temperature_unit=fahrenheit&timezone=America%2FChicago';
       final response = await http.get(Uri.parse(url));
 
       if (response.statusCode == 200) {
@@ -55,6 +56,8 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
         final daily = data['daily'];
         int hi = (daily['temperature_2m_max'][0] as num).round();
         int lo = (daily['temperature_2m_min'][0] as num).round();
+        int precipChance = (daily['precipitation_probability_max'][0] as num)
+            .round();
 
         final hourly = data['hourly'];
         final times = hourly['time'] as List;
@@ -86,7 +89,7 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
           upcomingHours.add({
             'time': "$h $amPm",
             'temp': "${(temps[i] as num).round()}°",
-            'precip': "${precips[i]}%",
+            'precip': (precips[i] as num).round(),
             'code': codes[i],
           });
         }
@@ -98,6 +101,7 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
             _weatherIcon = _decodeWeatherIcon(currentCode);
             _weatherIconColor = _decodeWeatherColor(currentCode);
             _dailyHiLow = "High $hi° • Low $lo°";
+            _dailyPrecipChance = precipChance;
             _hourlyForecast = upcomingHours;
           });
         }
@@ -150,12 +154,13 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
       final prefs = await SharedPreferences.getInstance();
       String? savedSleepStr = prefs.getString('axis_current_sleep_time');
 
-      // FALLBACK TO DATABASE IF PREFS WERE CLEARED
-      if (savedSleepStr == null) {
+      if (savedSleepStr == null && user != null) {
         final snapshot = await FirebaseFirestore.instance
             .collection('users')
-            .doc(user?.uid)
+            .doc(user.uid)
             .collection('user_analytics')
+            .doc('axis_forms')
+            .collection('entries')
             .orderBy('createdAt', descending: true)
             .limit(1)
             .get();
@@ -165,7 +170,6 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
         }
       }
 
-      // Safety check: ensure fallback sleep time isn't from weeks ago
       if (savedSleepStr != null) {
         DateTime sleepTime = DateTime.parse(savedSleepStr);
         if (DateTime.now().difference(sleepTime).inHours > 24) {
@@ -216,7 +220,6 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
     if (_sleepTimeStr.isNotEmpty) {
       final user = FirebaseAuth.instance.currentUser;
 
-      // --- THE FIX: Safety check prevents the yellow warning! ---
       if (user == null) {
         if (mounted) setState(() => _isSubmitting = false);
         return;
@@ -224,7 +227,6 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
 
       String timeCompleted = DateTime.now().toIso8601String();
 
-      // --- WAKE DAY LOGIC ---
       DateTime actualWakeTime = DateTime.parse(_wakeTimeStr);
       String actualWakeDateStr =
           "${actualWakeTime.year}-${actualWakeTime.month.toString().padLeft(2, '0')}-${actualWakeTime.day.toString().padLeft(2, '0')}";
@@ -233,13 +235,13 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
       String docId = baseDocId;
       int suffix = 1;
 
-      // --- DUPLICATE CHECKER ---
       while (true) {
-        // Notice we now use user.uid instead of user!.uid
         final checkSnap = await FirebaseFirestore.instance
             .collection('users')
             .doc(user.uid)
             .collection('user_analytics')
+            .doc('axis_forms')
+            .collection('entries')
             .doc(docId)
             .get();
 
@@ -259,6 +261,8 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
           .collection('users')
           .doc(user.uid)
           .collection('user_analytics')
+          .doc('axis_forms')
+          .collection('entries')
           .doc(docId)
           .set({
             'logicalDate': actualWakeDateStr,
@@ -414,168 +418,266 @@ class _MorningBriefingViewState extends State<MorningBriefingView> {
     });
   }
 
-  // --- REBUILT STEP 3 WEATHER: LOWERED HEADER + 4x4 GRID WITH DARK TILES ---
   Widget _buildStep3Weather() {
+    final theme = Theme.of(context);
+
     return GestureDetector(
       onTap: () => Navigator.pop(context, true),
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 20.0),
+        padding: const EdgeInsets.fromLTRB(16.0, 30.0, 16.0, 20.0),
         child: Column(
           children: [
-            // --- PUSHES THE HEADER DOWN FROM THE TOP ---
-            const SizedBox(height: 60),
-
-            // TOP HEADER (Centered side-by-side)
+            // ==========================================
+            // CENTERED PREMIUM HEADER
+            // ==========================================
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                // LEFT SIDE: Icon, Location, Hi/Low
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Icon(_weatherIcon, color: _weatherIconColor, size: 60),
-                    const SizedBox(height: 8),
-                    const Text(
-                      "Frisco, TX",
-                      style: TextStyle(
-                        color: Colors.white54,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    if (_dailyHiLow.isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Text(
-                        _dailyHiLow,
-                        style: const TextStyle(
-                          color: Colors.white38,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-
-                const SizedBox(width: 40),
-
-                // RIGHT SIDE: Giant Temp, Condition
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Text(
-                      _weatherTemp,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 60,
-                        fontWeight: FontWeight.bold,
-                        height: 1.1,
-                      ),
-                    ),
-                    Text(
-                      _weatherDesc,
-                      style: const TextStyle(
-                        color: Color(0xFF00C897),
-                        fontSize: 20,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
+                Icon(_weatherIcon, size: 70, color: _weatherIconColor),
+                const SizedBox(width: 16),
+                Text(
+                  _weatherTemp,
+                  style: const TextStyle(
+                    fontSize: 70,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                    height: 1.0,
+                  ),
                 ),
               ],
             ),
-
-            // --- GAP BETWEEN HEADER AND GRID ---
-            const SizedBox(height: 50),
-
-            // MIDDLE: 4x4 16-Hour Grid
-            Expanded(
-              child: Center(
-                child: _hourlyForecast.isNotEmpty
-                    ? GridView.builder(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: 4,
-                              mainAxisSpacing: 10,
-                              crossAxisSpacing: 10,
-                              childAspectRatio: 0.75, // Adjusts tile height
-                            ),
-                        itemCount: _hourlyForecast.length,
-                        itemBuilder: (context, index) {
-                          final hour = _hourlyForecast[index];
-                          return Container(
-                            decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.45),
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(color: Colors.white12),
-                            ),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  hour['time'],
-                                  style: const TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                Icon(
-                                  _decodeWeatherIcon(hour['code']),
-                                  color: _decodeWeatherColor(hour['code']),
-                                  size: 22,
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  hour['temp'],
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    const Icon(
-                                      Icons.water_drop,
-                                      color: Colors.blueAccent,
-                                      size: 10,
-                                    ),
-                                    const SizedBox(width: 2),
-                                    Text(
-                                      hour['precip'],
-                                      style: const TextStyle(
-                                        color: Colors.blueAccent,
-                                        fontSize: 10,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      )
-                    : const CircularProgressIndicator(color: Color(0xFF00C897)),
+            const SizedBox(height: 10),
+            Text(
+              _weatherDesc,
+              style: TextStyle(
+                fontSize: 22,
+                color: theme.colorScheme.primary,
+                fontWeight: FontWeight.w600,
               ),
             ),
+            const SizedBox(height: 6),
+            Text(
+              "Frisco, TX  •  $_dailyHiLow",
+              style: const TextStyle(fontSize: 16, color: Colors.white54),
+            ),
+            if (_dailyPrecipChance > 0) ...[
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(
+                    Icons.water_drop,
+                    color: Colors.blueAccent,
+                    size: 16,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    "$_dailyPrecipChance% Chance of Rain Today",
+                    style: const TextStyle(
+                      color: Colors.blueAccent,
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 30),
 
-            // BOTTOM: Call to action
+            // ==========================================
+            // 2-COLUMN TIMELINE (NO SCROLLING)
+            // ==========================================
+            Expanded(
+              child: _hourlyForecast.isNotEmpty
+                  ? Container(
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 12,
+                        horizontal: 16,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.3),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: Row(
+                        children: [
+                          // Left Column (Hours 1 - 8)
+                          Expanded(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: List.generate(8, (index) {
+                                if (index >= _hourlyForecast.length)
+                                  return const SizedBox.shrink();
+                                final hour = _hourlyForecast[index];
+                                return _CompactHourlyRow(
+                                  timeString: index == 0 ? "Now" : hour['time'],
+                                  temperature: hour['temp'],
+                                  weatherIcon: _decodeWeatherIcon(hour['code']),
+                                  weatherIconColor: _decodeWeatherColor(
+                                    hour['code'],
+                                  ),
+                                  precipChance: hour['precip'],
+                                  isNow: index == 0,
+                                );
+                              }),
+                            ),
+                          ),
+
+                          // Subtle Divider
+                          const Padding(
+                            padding: EdgeInsets.symmetric(
+                              horizontal: 8.0,
+                              vertical: 16.0,
+                            ),
+                            child: VerticalDivider(
+                              color: Colors.white12,
+                              width: 1,
+                            ),
+                          ),
+
+                          // Right Column (Hours 9 - 16)
+                          Expanded(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: List.generate(8, (index) {
+                                int realIndex = index + 8;
+                                if (realIndex >= _hourlyForecast.length)
+                                  return const SizedBox.shrink();
+                                final hour = _hourlyForecast[realIndex];
+                                return _CompactHourlyRow(
+                                  timeString: hour['time'],
+                                  temperature: hour['temp'],
+                                  weatherIcon: _decodeWeatherIcon(hour['code']),
+                                  weatherIconColor: _decodeWeatherColor(
+                                    hour['code'],
+                                  ),
+                                  precipChance: hour['precip'],
+                                );
+                              }),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : const Center(
+                      child: CircularProgressIndicator(
+                        color: Color(0xFF00C897),
+                      ),
+                    ),
+            ),
+
             const SizedBox(height: 20),
             const Text(
-              "Tap to start your day",
+              "Tap anywhere to start your day",
               style: TextStyle(color: Colors.white24, fontSize: 12),
             ),
-            const SizedBox(height: 30),
           ],
         ),
       ),
+    );
+  }
+}
+
+// ==========================================
+// MINIMALIST TIMELINE ROW WIDGET
+// ==========================================
+class _CompactHourlyRow extends StatelessWidget {
+  final String timeString;
+  final String temperature;
+  final IconData weatherIcon;
+  final Color weatherIconColor;
+  final int precipChance;
+  final bool isNow;
+
+  const _CompactHourlyRow({
+    required this.timeString,
+    required this.temperature,
+    required this.weatherIcon,
+    required this.weatherIconColor,
+    required this.precipChance,
+    this.isNow = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Row(
+      children: [
+        // 1. Time
+        SizedBox(
+          width: 45,
+          child: Text(
+            timeString,
+            style: TextStyle(
+              color: isNow ? theme.colorScheme.primary : Colors.white60,
+              fontWeight: isNow ? FontWeight.bold : FontWeight.w500,
+              fontSize: 14,
+            ),
+          ),
+        ),
+
+        // 2. Icon
+        Icon(
+          weatherIcon,
+          size: 20,
+          color: isNow ? theme.colorScheme.primary : weatherIconColor,
+        ),
+        const SizedBox(width: 8),
+
+        // 3. Temp (Increased font size and width)
+        SizedBox(
+          width: 40,
+          child: Text(
+            temperature,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 18,
+            ),
+          ),
+        ),
+
+        // 4. Rain (Pill Shaped)
+        Expanded(
+          child: precipChance > 0
+              ? Align(
+                  alignment: Alignment.centerRight,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.blueAccent.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(10), // Pill Shape
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.water_drop,
+                          color: Colors.blueAccent,
+                          size: 10,
+                        ),
+                        const SizedBox(width: 2),
+                        Text(
+                          "$precipChance%",
+                          style: const TextStyle(
+                            color: Colors.blueAccent,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : const SizedBox.shrink(),
+        ),
+      ],
     );
   }
 }

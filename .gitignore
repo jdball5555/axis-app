@@ -50,5 +50,13 @@ app.*.map.json
 
 # Archived Pages & Services
 lib/pages/ai_chat_page.dart
+lib/pages/training_page.dart
 lib/pages/ai_message_logs_page.dart
 lib/services/ai_service.dart
+# Secrets — never commit these
+.env
+.env.*
+*service-account*.json
+*serviceAccount*.json
+*.pem
+*.key

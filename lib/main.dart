@@ -10,27 +10,24 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart'; // REQUIRED FOR API SECRETS
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'firebase_options.dart';
 
 import 'services/notification_service.dart';
 import 'services/firestore_service.dart';
-// import 'services/ai_service.dart'; // ARCHIVED
 import 'models/tab_data.dart';
 
 import 'pages/home_page.dart';
-import 'pages/morning_page.dart';
-import 'pages/morning_briefing.dart';
+import 'pages/morning_briefing.dart'; // Full screen overlay only
 import 'pages/inventory_page.dart';
-import 'pages/stats_page.dart';
+import 'pages/data_page.dart';
 import 'pages/night_page.dart';
-// import 'pages/ai_chat_page.dart'; // ARCHIVED
-import 'pages/finances_page.dart'; // YOUR NEW FINANCES PAGE
+import 'pages/finances_page.dart';
 import 'pages/settings/settings_page.dart';
 import 'pages/settings/sections/switch_inventories_settings.dart';
 import 'pages/sign_in_page.dart';
 
-const String _appVersion = "0.7.4";
+const String _appVersion = "0.8.0";
 
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
@@ -188,6 +185,8 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
   int _currentIndex = 0;
   int _inventoryRefreshKey = 0;
   bool _triggerNightSurvey = false;
+  bool _isSleepScreenOpen =
+      false; // Safety lock to prevent multiple sleep screens
 
   late AnimationController _transitionController;
   bool _isTransitioning = false;
@@ -208,7 +207,6 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
   List<String> _knownRooms = [];
   List<TabData> _masterTabList = TabData.allTabs;
 
-  // REMOVED 'ai' FROM DEFAULT ACTIVE TABS
   Set<String> _activeTabIds = {'home', 'inventory', 'stats'};
 
   List<TabData> get _visibleTabs =>
@@ -247,8 +245,21 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
     NotificationService().checkAndScheduleSmartNotifications();
     NotificationService().setupInteractedMessage();
 
+    // ========================================================
+    // NOTIFICATION ROUTING (WITH SLEEP INTERCEPTION)
+    // ========================================================
     _notificationSub = NotificationService().selectNotificationStream.stream
-        .listen((payload) {
+        .listen((payload) async {
+          final prefs = await SharedPreferences.getInstance();
+          final isSleeping = prefs.getBool('axis_is_sleeping') ?? false;
+
+          // 1. SLEEP OVERRIDE: If sleeping, force sleep screen no matter what the notification was
+          if (isSleeping || payload == 'sleep_mode') {
+            _forceSleepScreen();
+            return;
+          }
+
+          // 2. NORMAL ROUTING
           if (payload == 'invite') {
             Navigator.push(
               context,
@@ -269,6 +280,33 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
     _checkStartupState();
   }
 
+  // ========================================================
+  // CENTRALIZED SLEEP SCREEN ROUTER
+  // ========================================================
+  Future<void> _forceSleepScreen() async {
+    // Prevent stacking multiple sleep screens if user spam-taps notification
+    if (_isSleepScreenOpen) return;
+    _isSleepScreenOpen = true;
+
+    final result = await Navigator.push(
+      context,
+      PageRouteBuilder(
+        pageBuilder: (context, animation, secondaryAnimation) =>
+            const NightDebriefFlow(startAsleep: true),
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          return FadeTransition(opacity: animation, child: child);
+        },
+      ),
+    );
+
+    _isSleepScreenOpen = false;
+
+    // Trigger morning sequence when they swipe up to wake
+    if (result == 'wake_up') {
+      _launchMorningBriefing();
+    }
+  }
+
   Future<void> _checkStartupState() async {
     final prefs = await SharedPreferences.getInstance();
     final isSleeping = prefs.getBool('axis_is_sleeping') ?? false;
@@ -276,22 +314,8 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
     await _loadStartupPage();
 
     if (isSleeping) {
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        final result = await Navigator.push(
-          context,
-          PageRouteBuilder(
-            pageBuilder: (context, animation, secondaryAnimation) =>
-                const NightDebriefFlow(startAsleep: true),
-            transitionsBuilder:
-                (context, animation, secondaryAnimation, child) {
-                  return FadeTransition(opacity: animation, child: child);
-                },
-          ),
-        );
-
-        if (result == 'wake_up') {
-          _launchMorningBriefing();
-        }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _forceSleepScreen();
       });
     }
   }
@@ -547,12 +571,12 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
           .map((e) => TabData.fromJson(e))
           .toList();
 
-      // PURGE THE GHOST TAB FROM MEMORY SO IT NEVER LOADS
-      savedTabs.removeWhere((t) => t.id == 'ai');
+      savedTabs.removeWhere((t) => t.id == 'ai' || t.id == 'morning');
 
       for (var defaultTab in TabData.allTabs) {
         if (!savedTabs.any((t) => t.id == defaultTab.id) &&
-            defaultTab.id != 'ai') {
+            defaultTab.id != 'ai' &&
+            defaultTab.id != 'morning') {
           savedTabs.add(defaultTab);
           _activeTabIds.add(defaultTab.id);
         }
@@ -562,10 +586,13 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
       final a = prefs.getStringList('axis_active_tab_ids');
       if (a != null) {
         _activeTabIds = a.toSet();
-        _activeTabIds.remove('ai'); // PURGE FROM ACTIVE LIST TOO
+        _activeTabIds.remove('ai');
+        _activeTabIds.remove('morning');
       }
     } else {
-      _masterTabList = TabData.allTabs.where((t) => t.id != 'ai').toList();
+      _masterTabList = TabData.allTabs
+          .where((t) => t.id != 'ai' && t.id != 'morning')
+          .toList();
     }
     setState(() {});
   }
@@ -598,9 +625,8 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
           onColorChanged: widget.onColorChanged,
           currentTabs: _visibleTabs,
           allPossibleTabs: _masterTabList,
-          appVersion: _appVersion,
           knownRooms: _knownRooms,
-          onViewAbout: () {},
+          appVersion: _appVersion,
           onTabToggled: _handleTabToggle,
           onTabsReordered: _updateMasterTabOrder,
           onImportInventory: _importInventory,
@@ -792,12 +818,12 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
                 Expanded(
                   child: PageView.builder(
                     controller: _pageController,
+                    allowImplicitScrolling: true,
                     onPageChanged: (i) => setState(() => _currentIndex = i),
                     itemCount: _visibleTabs.length,
                     itemBuilder: (c, i) {
                       final id = _visibleTabs[i].id;
                       if (id == 'home') return const HomeTab();
-                      if (id == 'morning') return const MorningBriefTab();
 
                       if (id == 'night') {
                         return NightDebriefTab(
@@ -815,11 +841,8 @@ class _MainShellState extends State<MainShell> with TickerProviderStateMixin {
                         );
                       }
                       if (id == 'stats') {
-                        return StatsPage(key: ValueKey(_inventoryRefreshKey));
+                        return DataPage(key: ValueKey(_inventoryRefreshKey));
                       }
-
-                      // if (id == 'ai') return const AxisAIChatPage(); // ARCHIVED
-
                       if (id == 'finances') return const FinancesTab();
 
                       return const SizedBox();

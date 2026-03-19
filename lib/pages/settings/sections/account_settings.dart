@@ -3,7 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../services/firestore_service.dart';
 import '../../sign_in_page.dart';
-import '../widgets/settings_widgets.dart';
+import '../widgets/settings_format.dart';
 import 'switch_inventories_settings.dart';
 
 class AccountSettings extends StatefulWidget {
@@ -78,302 +78,14 @@ class _AccountSettingsState extends State<AccountSettings> {
     }
   }
 
-  // --- UPDATED: PULL ANALYTICS FROM CLOUD ---
-  Future<void> _viewUserAnalytics() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => Scaffold(
-          appBar: AppBar(
-            title: const Text("User Analytics"),
-            backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-          ),
-          body: StreamBuilder<QuerySnapshot>(
-            stream: FirebaseFirestore.instance
-                .collection('users')
-                .doc(user.uid)
-                .collection('user_analytics')
-                .orderBy('timestamp', descending: true)
-                .snapshots(),
-            builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
-              }
-              if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                return const Center(
-                  child: Text(
-                    "No cloud data found.\nComplete a Nightly Debrief to start syncing!",
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white54),
-                  ),
-                );
-              }
-
-              return SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: SingleChildScrollView(
-                  child: DataTable(
-                    columns: const [
-                      DataColumn(
-                        label: Text(
-                          'Date',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                      DataColumn(
-                        label: Text(
-                          'Rating',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                      DataColumn(
-                        label: Text(
-                          'Productivity',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                      DataColumn(
-                        label: Text(
-                          'Sleep (Exact)',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                      DataColumn(
-                        label: Text(
-                          'Wake (Exact)',
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ],
-                    rows: snapshot.data!.docs.map((doc) {
-                      final data = doc.data() as Map<String, dynamic>;
-
-                      String formatTime(String? t) {
-                        if (t == null || t == "N/A") return "N/A";
-                        try {
-                          DateTime dt = DateTime.parse(t);
-                          return "${dt.hour}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}";
-                        } catch (e) {
-                          return "N/A";
-                        }
-                      }
-
-                      return DataRow(
-                        cells: [
-                          DataCell(
-                            Text(
-                              doc.id,
-                              style: const TextStyle(color: Colors.white70),
-                            ),
-                          ),
-                          DataCell(
-                            Text(
-                              data['rating'] ?? "",
-                              style: const TextStyle(color: Colors.white70),
-                            ),
-                          ),
-                          DataCell(
-                            Text(
-                              data['productivity'] ?? "",
-                              style: const TextStyle(color: Colors.white70),
-                            ),
-                          ),
-                          DataCell(
-                            Text(
-                              formatTime(data['sleepTime']),
-                              style: const TextStyle(color: Colors.white70),
-                            ),
-                          ),
-                          DataCell(
-                            Text(
-                              formatTime(data['wakeTime']),
-                              style: const TextStyle(color: Colors.white70),
-                            ),
-                          ),
-                        ],
-                      );
-                    }).toList(),
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildInviteCard(ThemeData theme, Map<String, dynamic> invite) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 15),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            theme.colorScheme.primary.withOpacity(0.15),
-            theme.colorScheme.primary.withOpacity(0.05),
-          ],
-        ),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: theme.colorScheme.primary.withOpacity(0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                Icons.mark_email_unread_outlined,
-                color: theme.colorScheme.primary,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: RichText(
-                  text: TextSpan(
-                    style: TextStyle(
-                      color: theme.colorScheme.onSurface,
-                      fontSize: 14,
-                    ),
-                    children: [
-                      TextSpan(
-                        text: invite['inviterName'] ?? "Someone",
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const TextSpan(text: " invited you to "),
-                      TextSpan(
-                        text: invite['householdName'] ?? "Inventory",
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 15),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 0),
-                    side: BorderSide(color: theme.dividerColor),
-                  ),
-                  onPressed: () =>
-                      FirestoreService().declineInvitation(invite['id']),
-                  child: Text(
-                    "Decline",
-                    style: TextStyle(color: theme.colorScheme.onSurface),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 0),
-                    backgroundColor: theme.colorScheme.primary,
-                    foregroundColor: Colors.black,
-                    elevation: 0,
-                  ),
-                  onPressed: () => FirestoreService().acceptInvitation(
-                    invite['id'],
-                    invite['householdId'],
-                  ),
-                  child: const Text("Accept"),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final user = FirebaseAuth.instance.currentUser;
 
-    return ResponsiveSettingsGrid(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // --- 1. DISPLAY NAME ---
-        Container(
-          height: 70,
-          margin: const EdgeInsets.only(bottom: 15),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            gradient: LinearGradient(
-              begin: Alignment.centerLeft,
-              end: Alignment.centerRight,
-              colors: [
-                theme.colorScheme.primary.withOpacity(0.1),
-                theme.colorScheme.primary.withOpacity(0.4),
-              ],
-              stops: const [0.0, 1.0],
-            ),
-            border: Border.all(color: theme.dividerColor.withOpacity(0.1)),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.primary.withOpacity(0.15),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    Icons.person_outline,
-                    color: theme.colorScheme.primary,
-                    size: 20,
-                  ),
-                ),
-                const SizedBox(width: 20),
-                Expanded(
-                  child: TextField(
-                    controller: _nameController,
-                    focusNode: _nameFocus,
-                    enabled: _isEditingName,
-                    decoration: const InputDecoration(
-                      border: InputBorder.none,
-                      hintText: "Display Name",
-                      isDense: true,
-                      contentPadding: EdgeInsets.zero,
-                    ),
-                    style: TextStyle(
-                      fontSize: 16,
-                      color: theme.colorScheme.onSurface,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    onSubmitted: (_) => _toggleNameEdit(),
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(
-                    _isEditingName ? Icons.check : Icons.edit,
-                    color: theme.colorScheme.primary,
-                  ),
-                  onPressed: _toggleNameEdit,
-                ),
-              ],
-            ),
-          ),
-        ),
-
-        // --- 2. EMAIL (Read Only) ---
-        GradientSettingsTile(
-          icon: Icons.email_outlined,
-          title: "Email",
-          subtitle: user?.email ?? "Not Logged In",
-          onTap: () {},
-          trailing: const SizedBox(),
-        ),
-
         // --- PENDING INVITATIONS ---
         StreamBuilder<List<Map<String, dynamic>>>(
           stream: FirestoreService().getInvitationsStream(),
@@ -382,142 +94,207 @@ class _AccountSettingsState extends State<AccountSettings> {
               return const SizedBox.shrink();
             }
             return Column(
-              children: snapshot.data!
-                  .map((invite) => _buildInviteCard(theme, invite))
-                  .toList(),
+              children: snapshot.data!.map((invite) {
+                return InviteSettingsTile(
+                  invite: invite,
+                  onAccept: () => FirestoreService().acceptInvitation(
+                    invite['id'],
+                    invite['householdId'],
+                  ),
+                  onDecline: () =>
+                      FirestoreService().declineInvitation(invite['id']),
+                );
+              }).toList(),
             );
           },
         ),
 
-        // --- 3. SWITCH INVENTORY ---
-        GradientSettingsTile(
-          icon: Icons.swap_horiz,
-          title: "Switch Inventory",
-          subtitle: _currentHouseholdName,
-          onTap: () async {
-            await Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (c) => const SwitchInventoriesSettings(),
-              ),
-            );
-            _loadHouseholdName();
-          },
-        ),
-
-        // --- 4. USER ANALYTICS (Matches Switch Inventory Style) ---
-        GradientSettingsTile(
-          icon: Icons.insights,
-          title: "User Analytics",
-          subtitle: "View your history from the cloud",
-          onTap: _viewUserAnalytics,
-        ),
-
-        // --- 5. SIGN OUT ---
-        GradientSettingsTile(
-          icon: Icons.logout,
-          title: "Sign Out",
-          subtitle: "Log out of this device",
-          trailing: const SizedBox(),
-          onTap: () async {
-            bool? confirm = await showDialog<bool>(
-              context: context,
-              builder: (ctx) => AlertDialog(
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                backgroundColor: theme.cardColor,
-                contentPadding: const EdgeInsets.all(24),
-                content: Column(
-                  mainAxisSize: MainAxisSize.min,
+        // --- RESPONSIVE GRID FOR TILES ---
+        ResponsiveSettingsGrid(
+          children: [
+            // --- 1. DISPLAY NAME ---
+            GradientSettingsTile(
+              icon: Icons.person_outline,
+              title: "Display Name",
+              trailing: SizedBox(
+                width:
+                    160, // Constrains the Row to prevent unbounded width exceptions
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.redAccent.withOpacity(0.15),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        Icons.logout_rounded,
-                        size: 32,
-                        color: Colors.redAccent,
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    Text(
-                      "Sign Out",
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: theme.colorScheme.onSurface,
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      "Are you sure you want to log out?",
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: theme.colorScheme.onSurface.withOpacity(0.7),
-                        fontSize: 15,
-                      ),
-                    ),
-                    const SizedBox(height: 25),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextButton(
-                            style: TextButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                            ),
-                            onPressed: () => Navigator.pop(ctx, false),
-                            child: Text(
-                              "Cancel",
-                              style: TextStyle(
-                                color: theme.colorScheme.onSurface,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
+                    Expanded(
+                      child: TextField(
+                        controller: _nameController,
+                        focusNode: _nameFocus,
+                        enabled: _isEditingName,
+                        textAlign: TextAlign.end,
+                        decoration: const InputDecoration(
+                          border: InputBorder.none,
+                          hintText: "Your Name",
+                          isDense: true,
+                          contentPadding: EdgeInsets.zero,
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              backgroundColor: Colors.redAccent,
-                              foregroundColor: Colors.white,
-                              elevation: 0,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                            ),
-                            onPressed: () => Navigator.pop(ctx, true),
-                            child: const Text(
-                              "Sign Out",
-                              style: TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                          ),
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: theme.colorScheme.onSurface,
+                          fontWeight: FontWeight.normal,
                         ),
-                      ],
+                        onSubmitted: (_) => _toggleNameEdit(),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    IconButton(
+                      icon: Icon(
+                        _isEditingName ? Icons.check : Icons.edit,
+                        color: theme.colorScheme.primary,
+                        size: 20,
+                      ),
+                      onPressed: _toggleNameEdit,
                     ),
                   ],
                 ),
               ),
-            );
+            ),
 
-            if (confirm == true) {
-              await FirebaseAuth.instance.signOut();
-              if (mounted) {
-                Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (context) => const SignInPage()),
-                  (route) => false,
+            // --- 2. EMAIL (Read Only) ---
+            GradientSettingsTile(
+              icon: Icons.email_outlined,
+              title: "Email",
+              subtitle: user?.email ?? "Not Logged In",
+              trailing: const SizedBox(),
+            ),
+
+            // --- 3. SWITCH INVENTORY ---
+            GradientSettingsTile(
+              icon: Icons.swap_horiz,
+              title: "Switch Inventory",
+              subtitle: _currentHouseholdName,
+              onTap: () async {
+                await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (c) => const SwitchInventoriesSettings(),
+                  ),
                 );
-              }
-            }
-          },
+                _loadHouseholdName();
+              },
+            ),
+
+            // --- 4. SIGN OUT ---
+            GradientSettingsTile(
+              icon: Icons.logout,
+              title: "Sign Out",
+              trailing: const SizedBox(),
+              onTap: () async {
+                bool? confirm = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    backgroundColor: theme.cardColor,
+                    contentPadding: const EdgeInsets.all(24),
+                    content: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.redAccent.withOpacity(0.15),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.logout_rounded,
+                            size: 32,
+                            color: Colors.redAccent,
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        Text(
+                          "Sign Out",
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: theme.colorScheme.onSurface,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          "Are you sure you want to log out?",
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: theme.colorScheme.onSurface.withOpacity(0.7),
+                            fontSize: 15,
+                          ),
+                        ),
+                        const SizedBox(height: 25),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextButton(
+                                style: TextButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 12,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                onPressed: () => Navigator.pop(ctx, false),
+                                child: Text(
+                                  "Cancel",
+                                  style: TextStyle(
+                                    color: theme.colorScheme.onSurface,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 12,
+                                  ),
+                                  backgroundColor: Colors.redAccent,
+                                  foregroundColor: Colors.white,
+                                  elevation: 0,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                onPressed: () => Navigator.pop(ctx, true),
+                                child: const Text(
+                                  "Sign Out",
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+
+                if (confirm == true) {
+                  await FirebaseAuth.instance.signOut();
+                  if (mounted) {
+                    Navigator.of(
+                      context,
+                      rootNavigator: true,
+                    ).pushAndRemoveUntil(
+                      MaterialPageRoute(
+                        builder: (context) => const SignInPage(),
+                      ),
+                      (route) => false,
+                    );
+                  }
+                }
+              },
+            ),
+          ],
         ),
       ],
     );

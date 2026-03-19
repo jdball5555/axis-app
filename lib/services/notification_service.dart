@@ -3,6 +3,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 import 'package:flutter_timezone/flutter_timezone.dart';
@@ -24,6 +25,23 @@ class NotificationService {
   final StreamController<String?> selectNotificationStream =
       StreamController<String?>.broadcast();
 
+  // ==========================================
+  // THE GATEKEEPER: INTERCEPTS ALL TAPS
+  // ==========================================
+  Future<void> _handleNotificationTap(String? payload) async {
+    final prefs = await SharedPreferences.getInstance();
+    final isSleeping = prefs.getBool('axis_is_sleeping') ?? false;
+
+    if (isSleeping) {
+      debugPrint(
+        "💤 App is sleeping. Redirecting notification to Sleep Screen.",
+      );
+      selectNotificationStream.add('sleep_mode');
+    } else {
+      selectNotificationStream.add(payload ?? 'default');
+    }
+  }
+
   Future<void> setupInteractedMessage() async {
     RemoteMessage? initialMessage = await _firebaseMessaging
         .getInitialMessage();
@@ -33,7 +51,16 @@ class NotificationService {
     FirebaseMessaging.onMessageOpenedApp.listen(_handleMessage);
   }
 
-  void _handleMessage(RemoteMessage message) {
+  Future<void> _handleMessage(RemoteMessage message) async {
+    final prefs = await SharedPreferences.getInstance();
+    final isSleeping = prefs.getBool('axis_is_sleeping') ?? false;
+
+    if (isSleeping) {
+      debugPrint("💤 App is sleeping. Redirecting FCM to Sleep Screen.");
+      selectNotificationStream.add('sleep_mode');
+      return;
+    }
+
     String? type = message.data['type'];
     if (type != null) {
       debugPrint("🚀 Notification Tapped. Type: $type");
@@ -65,6 +92,14 @@ class NotificationService {
         importance: Importance.max,
       );
 
+      const AndroidNotificationChannel sleepChannel =
+          AndroidNotificationChannel(
+            'axis_sleep_channel',
+            'Sleep Mode',
+            description: 'Ongoing notification while Axis is tracking sleep',
+            importance: Importance.low,
+          );
+
       final AndroidFlutterLocalNotificationsPlugin? androidPlatform =
           flutterLocalNotificationsPlugin
               .resolvePlatformSpecificImplementation<
@@ -73,6 +108,7 @@ class NotificationService {
 
       if (androidPlatform != null) {
         await androidPlatform.createNotificationChannel(channel);
+        await androidPlatform.createNotificationChannel(sleepChannel);
       }
 
       const AndroidInitializationSettings initializationSettingsAndroid =
@@ -94,7 +130,7 @@ class NotificationService {
       await flutterLocalNotificationsPlugin.initialize(
         initializationSettings,
         onDidReceiveNotificationResponse: (NotificationResponse response) {
-          selectNotificationStream.add(response.payload);
+          _handleNotificationTap(response.payload);
         },
       );
 
@@ -177,7 +213,6 @@ class NotificationService {
     required String body,
     required String payload,
   }) async {
-    // FIX: Add BigTextStyle to allow long lists in notifications
     final BigTextStyleInformation bigTextStyleInformation =
         BigTextStyleInformation(
           body,
@@ -193,7 +228,7 @@ class NotificationService {
           importance: Importance.max,
           priority: Priority.high,
           icon: 'notification_icon',
-          styleInformation: bigTextStyleInformation, // <--- ENABLED HERE
+          styleInformation: bigTextStyleInformation,
         );
 
     final NotificationDetails details = NotificationDetails(
@@ -208,6 +243,42 @@ class NotificationService {
       details,
       payload: payload,
     );
+  }
+
+  // ==========================================
+  // INSTANT SLEEP NOTIFICATION
+  // ==========================================
+  Future<void> showSleepNotification() async {
+    const AndroidNotificationDetails androidDetails =
+        AndroidNotificationDetails(
+          'axis_sleep_channel',
+          'Sleep Mode',
+          channelDescription:
+              'Ongoing notification while Axis is tracking sleep',
+          importance: Importance.low,
+          priority: Priority.low,
+          ongoing: true,
+          autoCancel: false,
+          icon: 'notification_icon',
+        );
+
+    final NotificationDetails details = NotificationDetails(
+      android: androidDetails,
+      iOS: const DarwinNotificationDetails(),
+    );
+
+    // Bypasses the Foreground Service delay and shows instantly
+    await flutterLocalNotificationsPlugin.show(
+      888,
+      'Sleep Mode is On',
+      null,
+      details,
+      payload: 'sleep_mode',
+    );
+  }
+
+  Future<void> cancelSleepNotification() async {
+    await flutterLocalNotificationsPlugin.cancel(888);
   }
 
   Future<void> updateReportSettings(

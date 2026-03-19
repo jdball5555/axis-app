@@ -4,7 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../../../services/firestore_service.dart';
 
 import '../../../models/text_input.dart';
-import '../widgets/settings_widgets.dart';
+import '../widgets/settings_format.dart';
 
 class SwitchInventoriesSettings extends StatefulWidget {
   const SwitchInventoriesSettings({super.key});
@@ -417,6 +417,7 @@ class _SwitchInventoriesSettingsState extends State<SwitchInventoriesSettings> {
                   onTap: _showInviteDialog,
                 ),
 
+
                 // --- PENDING INVITES SECTION ---
                 StreamBuilder<QuerySnapshot>(
                   stream: _db
@@ -429,99 +430,28 @@ class _SwitchInventoriesSettingsState extends State<SwitchInventoriesSettings> {
                       return const SizedBox.shrink();
                     }
 
-                    // Filter out invites we just acted on but DB hasn't deleted yet
-                    final visibleInvites = inviteSnap.data!.docs.where((doc) {
-                      return !_hiddenInviteIds.contains(doc.id);
-                    }).toList();
+                    final visibleInvites = inviteSnap.data!.docs
+                        .where((doc) => !_hiddenInviteIds.contains(doc.id))
+                        .toList();
 
                     if (visibleInvites.isEmpty) return const SizedBox.shrink();
 
                     return Column(
-                      children: visibleInvites.map((doc) {
-                        final invite = doc.data() as Map<String, dynamic>;
-                        final inviteId = doc.id;
-                        final householdName =
-                            invite['householdName'] ?? 'Inventory';
-                        final inviterName = invite['inviterName'] ?? 'Someone';
-                        final householdId = invite['householdId'];
-
-                        return Container(
-                          margin: const EdgeInsets.only(top: 15),
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.primary.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: theme.colorScheme.primary.withOpacity(0.3),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Icon(
-                                    Icons.mark_email_unread_outlined,
-                                    color: theme.colorScheme.primary,
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: Text(
-                                      "$inviterName invited you to join $householdName",
-                                      style: TextStyle(
-                                        color: theme.colorScheme.onSurface,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 15),
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: OutlinedButton(
-                                      style: OutlinedButton.styleFrom(
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            10,
-                                          ),
-                                        ),
-                                      ),
-                                      onPressed: () async {
-                                        await _handleDecline(inviteId);
-                                      },
-                                      child: const Text("Decline"),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: ElevatedButton(
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor:
-                                            theme.colorScheme.primary,
-                                        foregroundColor: Colors.black,
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            10,
-                                          ),
-                                        ),
-                                      ),
-                                      onPressed: () async {
-                                        await _handleAccept(
-                                          inviteId,
-                                          householdId,
-                                        );
-                                      },
-                                      child: const Text("Accept"),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        );
-                      }).toList(),
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 15),
+                        const SettingsHeader(title: "Pending Invites"),
+                        ...visibleInvites.map((doc) {
+                          final invite = doc.data() as Map<String, dynamic>;
+                          invite['id'] = doc.id; // Ensure ID is in the map
+                          return InviteSettingsTile(
+                            invite: invite,
+                            onAccept: () =>
+                                _handleAccept(doc.id, invite['householdId']),
+                            onDecline: () => _handleDecline(doc.id),
+                          );
+                        }).toList(),
+                      ],
                     );
                   },
                 ),
@@ -529,18 +459,7 @@ class _SwitchInventoriesSettingsState extends State<SwitchInventoriesSettings> {
                 // ---------------------------------
                 const SizedBox(height: 25),
 
-                Padding(
-                  padding: const EdgeInsets.only(left: 4, bottom: 10),
-                  child: Text(
-                    "YOUR INVENTORIES",
-                    style: TextStyle(
-                      color: theme.colorScheme.primary,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                      letterSpacing: 1.5,
-                    ),
-                  ),
-                ),
+                const SettingsHeader(title: "Your Inventories"),
 
                 if (joinedIds.isEmpty)
                   Container(

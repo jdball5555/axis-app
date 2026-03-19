@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import '../services/notification_service.dart'; // <-- ADDED IMPORT
 
 // =========================================================
 // GLOBAL MEMORY BANK
@@ -193,8 +196,7 @@ class _NightDebriefTabState extends State<NightDebriefTab> {
 // =========================================================
 
 class NightDebriefFlow extends StatefulWidget {
-  final bool
-  startAsleep; // NEW: Tells the page to instantly load the Sleep Screen
+  final bool startAsleep;
 
   const NightDebriefFlow({super.key, this.startAsleep = false});
 
@@ -205,6 +207,7 @@ class NightDebriefFlow extends StatefulWidget {
 class _NightDebriefFlowState extends State<NightDebriefFlow>
     with SingleTickerProviderStateMixin {
   bool _isAsleep = false;
+  bool _showEarlyWakeConfirm = false;
   String _userName = "David";
   late AnimationController _sleepAnimController;
 
@@ -215,6 +218,7 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
     'preset_mind_tiles',
     'preset_interesting',
     'preset_inventory_check',
+    'preset_alarm_check',
     'preset_ai_close_sleep',
   ];
 
@@ -229,10 +233,9 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
       duration: const Duration(milliseconds: 400),
     );
 
-    // --- INSTANT SLEEP MODE ACTIVATION ---
     _isAsleep = widget.startAsleep;
     if (_isAsleep) {
-      _sleepAnimController.value = 1.0; // Instantly jump to fully asleep
+      _sleepAnimController.value = 1.0;
     }
 
     final user = FirebaseAuth.instance.currentUser;
@@ -257,6 +260,8 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
             .collection('users')
             .doc(user.uid)
             .collection('user_analytics')
+            .doc('axis_forms')
+            .collection('entries')
             .get();
 
         final thirtyDaysAgo = now.subtract(const Duration(days: 30));
@@ -345,6 +350,8 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
           .collection('users')
           .doc(user.uid)
           .collection('user_analytics')
+          .doc('axis_forms')
+          .collection('entries')
           .doc(docId)
           .get();
 
@@ -370,6 +377,8 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
         .collection('users')
         .doc(user.uid)
         .collection('user_analytics')
+        .doc('axis_forms')
+        .collection('entries')
         .doc(docId)
         .set({
           'logicalDate': dateStr,
@@ -380,6 +389,19 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
           'mindTiles': DebriefSession.selectedMindTiles.toList(),
           'interestingNote': interestingStr,
         }, SetOptions(merge: true));
+  }
+
+  void _wakeUp() {
+    _sleepAnimController.reverse().then((_) async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('axis_is_sleeping', false);
+
+      // <-- REMOVE THE NOTIFICATION UPON WAKING UP
+      await NotificationService().cancelSleepNotification();
+
+      DebriefSession.reset();
+      if (mounted) Navigator.pop(context, 'wake_up');
+    });
   }
 
   // --- UI PRESETS ---
@@ -402,16 +424,153 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
   }
 
   Widget _buildAIResponse1() {
-    final rating = DebriefSession.answers['rate_day'] ?? "good";
-    String line1 = "I'm glad you're here, $_userName.";
-    String line2 =
-        "You showed up today, and that's enough. Let's clear your mind for tomorrow.";
+    final rating = DebriefSession.answers['rate_day'] ?? "It was good";
+    final random = Random();
 
-    if (rating.contains("horrible") || rating.contains("terrible")) {
-      line1 = "I'm so sorry today was rough, $_userName.";
-      line2 =
-          "Take a deep breath. You made it through, and tomorrow is a fresh start.";
+    List<List<String>> responses;
+
+    switch (rating) {
+      case "It was horrible":
+        responses = [
+          [
+            "I'm so sorry today was so difficult, $_userName.",
+            "Take a deep breath. You survived it, and tomorrow is a new beginning.",
+          ],
+          [
+            "That sounds incredibly tough, $_userName.",
+            "Let's let it go. Tomorrow owes you nothing.",
+          ],
+          [
+            "I hear you, $_userName. Today was a heavy one.",
+            "Close the loop on it. Rest is your priority now.",
+          ],
+        ];
+        break;
+      case "It was pretty terrible":
+        responses = [
+          [
+            "I'm sorry it was such a rough day, $_userName.",
+            "You made it to the end. Let's reset your mind.",
+          ],
+          [
+            "Days like this are exhausting, $_userName.",
+            "Be kind to yourself tonight. Let's wind down.",
+          ],
+          [
+            "That's really frustrating, $_userName.",
+            "Let's put this day behind us. Tomorrow is a blank slate.",
+          ],
+        ];
+        break;
+      case "It wasn't great":
+        responses = [
+          [
+            "I'm sorry it wasn't the best day, $_userName.",
+            "Not every day can be a win. Let's prepare for a better tomorrow.",
+          ],
+          [
+            "Those mediocre days can drain you, $_userName.",
+            "Let's shake it off and get some good rest.",
+          ],
+          [
+            "I hear you, $_userName. Tomorrow is another chance.",
+            "Let's clear the noise and get ready for it.",
+          ],
+        ];
+        break;
+      case "It was ok":
+        responses = [
+          [
+            "Sometimes 'ok' is exactly what we need, $_userName.",
+            "Let's coast into the evening and recharge.",
+          ],
+          [
+            "A steady day is a good day, $_userName.",
+            "Let's log it and get you some well-deserved rest.",
+          ],
+          [
+            "Not too bad, not too crazy, $_userName.",
+            "Let's clear your mind for whatever tomorrow brings.",
+          ],
+        ];
+        break;
+      case "It was good":
+        responses = [
+          [
+            "I'm glad you had a good day, $_userName.",
+            "Let's capture those good vibes and wind down.",
+          ],
+          [
+            "A solid day in the books, $_userName.",
+            "Great work today. Let's tie off the loose ends.",
+          ],
+          [
+            "Glad to hear it, $_userName!",
+            "Let's finish up so you can enjoy your evening.",
+          ],
+        ];
+        break;
+      case "It was pretty great":
+        responses = [
+          [
+            "That's awesome to hear, $_userName!",
+            "Keep that momentum going. Let's clear your head for tomorrow.",
+          ],
+          [
+            "Love to see a great day, $_userName.",
+            "Let's lock it in and get you some rest.",
+          ],
+          [
+            "Sounds like things really clicked today, $_userName.",
+            "Let's clear your mind so you can wake up fresh.",
+          ],
+        ];
+        break;
+      case "It was amazing!":
+        responses = [
+          [
+            "Incredible! I'm thrilled for you, $_userName.",
+            "Days like this are what it's all about. Let's lock in this win.",
+          ],
+          [
+            "Wow, what a fantastic day, $_userName!",
+            "Let's log this win and celebrate with some good sleep.",
+          ],
+          [
+            "Amazing job today, $_userName.",
+            "Hold onto that feeling as you wind down tonight.",
+          ],
+        ];
+        break;
+      case "Best day ever!":
+        responses = [
+          [
+            "That is absolutely spectacular, $_userName!",
+            "I'm so happy for you. Let's end this perfect day right.",
+          ],
+          [
+            "A top-tier day, $_userName! Incredible.",
+            "Rest easy knowing you absolutely crushed it today.",
+          ],
+          [
+            "Best day ever? That's amazing, $_userName.",
+            "Let's get this logged so you can dream about the wins.",
+          ],
+        ];
+        break;
+      default:
+        responses = [
+          [
+            "I'm glad you're here, $_userName.",
+            "You showed up today, and that's enough. Let's clear your mind.",
+          ],
+        ];
+        break;
     }
+
+    final selectedResponse = responses[random.nextInt(responses.length)];
+    final String line1 = selectedResponse[0];
+    final String line2 = selectedResponse[1];
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -638,7 +797,72 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
           ),
         ),
         const SizedBox(height: 40),
-        _buildNextButton("Continue Debrief", onTap: () => _nextBlock()),
+        _buildNextButton("Next", onTap: () => _nextBlock()),
+      ],
+    );
+  }
+
+  Widget _buildAlarmCheck() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Is your alarm set for tomorrow?",
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 26,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 20),
+        const Text(
+          "Make sure you're ready for the morning.",
+          style: TextStyle(color: Colors.white54, fontSize: 16),
+        ),
+        const SizedBox(height: 40),
+        OutlinedButton.icon(
+          onPressed: () async {
+            final List<String> intentStrings = [
+              'intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.APP_CLOCK;end',
+              'intent:#Intent;action=android.intent.action.SHOW_ALARMS;end',
+              'intent:#Intent;action=android.intent.action.SET_ALARM;end',
+              'intent:#Intent;package=com.google.android.deskclock;end',
+              'intent:#Intent;package=com.sec.android.app.clockpackage;end',
+              'intent:#Intent;package=com.oneplus.deskclock;end',
+            ];
+
+            bool launched = false;
+            for (String intentStr in intentStrings) {
+              try {
+                launched = await launchUrl(
+                  Uri.parse(intentStr),
+                  mode: LaunchMode.externalApplication,
+                );
+                if (launched) break;
+              } catch (e) {}
+            }
+
+            if (!launched && mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text(
+                    "Unable to auto-open the Clock app. Please open it manually.",
+                  ),
+                  backgroundColor: Colors.redAccent,
+                ),
+              );
+            }
+          },
+          icon: const Icon(Icons.alarm),
+          label: const Text("Open Clock App"),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: const Color(0xFF00C897),
+            side: const BorderSide(color: Color(0xFF00C897)),
+            padding: const EdgeInsets.symmetric(vertical: 15, horizontal: 20),
+          ),
+        ),
+        const SizedBox(height: 40),
+        _buildNextButton("Next", onTap: () => _nextBlock()),
       ],
     );
   }
@@ -648,6 +872,13 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
       "You tied off your day, $_userName.",
       "Great job today, $_userName.",
       "Rest easy, $_userName. You've earned it.",
+      "The day is done. Let it go, $_userName.",
+      "Close your eyes, $_userName. Tomorrow is a blank slate.",
+      "All loops are closed. Time to recharge.",
+      "You did your best today, $_userName. Now, rest.",
+      "I'll hold down the fort. Sleep well, $_userName.",
+      "Disconnecting... Sweet dreams, $_userName.",
+      "Another day in the books. Goodnight, $_userName.",
     ];
     final phrase = phrases[Random().nextInt(phrases.length)];
 
@@ -665,6 +896,9 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
             // LOCKS APP INTO SLEEP MODE
             final prefs = await SharedPreferences.getInstance();
             await prefs.setBool('axis_is_sleeping', true);
+
+            // <-- FIRE THE NOTIFICATION
+            await NotificationService().showSleepNotification();
 
             _submitDebriefNow();
           });
@@ -704,18 +938,60 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
   }
 
   Widget _buildSleepScreen() {
+    if (_showEarlyWakeConfirm) {
+      int sleptMins = DateTime.now()
+          .difference(DebriefSession.sleepTime ?? DateTime.now())
+          .inMinutes;
+
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              "You have only been asleep for $sleptMins minutes.",
+              style: const TextStyle(color: Colors.white38, fontSize: 16),
+            ),
+            const SizedBox(height: 30),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                TextButton(
+                  onPressed: () =>
+                      setState(() => _showEarlyWakeConfirm = false),
+                  child: const Text(
+                    "Cancel",
+                    style: TextStyle(color: Colors.white24),
+                  ),
+                ),
+                const SizedBox(width: 30),
+                TextButton(
+                  onPressed: _wakeUp,
+                  child: const Text(
+                    "Wake Up",
+                    style: TextStyle(color: Colors.white24),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onVerticalDragUpdate: (details) {
         if (details.delta.dy < -5) {
-          _sleepAnimController.reverse().then((_) async {
-            // UNLOCKS APP FROM SLEEP MODE
-            final prefs = await SharedPreferences.getInstance();
-            await prefs.setBool('axis_is_sleeping', false);
-
-            DebriefSession.reset();
-            if (mounted) Navigator.pop(context, 'wake_up');
-          });
+          if (DebriefSession.sleepTime != null) {
+            int sleptMins = DateTime.now()
+                .difference(DebriefSession.sleepTime!)
+                .inMinutes;
+            if (sleptMins < 60) {
+              setState(() => _showEarlyWakeConfirm = true);
+              return;
+            }
+          }
+          _wakeUp();
         }
       },
       child: const Center(
@@ -825,6 +1101,9 @@ class _NightDebriefFlowState extends State<NightDebriefFlow>
           break;
         case 'preset_inventory_check':
           content = _buildInventoryCheck();
+          break;
+        case 'preset_alarm_check':
+          content = _buildAlarmCheck();
           break;
         case 'preset_ai_close_sleep':
           content = _buildCloseAndSleep();

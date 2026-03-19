@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
-import '../widgets/color_wheel_picker.dart';
-import '../widgets/settings_widgets.dart'; // Import the new reusable widgets
+import '../widgets/settings_format.dart';
 
-class AppearanceSettings extends StatefulWidget {
+class AppearanceSettings extends StatelessWidget {
   final bool isLightMode;
   final Function(bool) onThemeChanged;
   final Color currentPrimaryColor;
@@ -16,95 +15,34 @@ class AppearanceSettings extends StatefulWidget {
     required this.onColorChanged,
   });
 
-  @override
-  State<AppearanceSettings> createState() => _AppearanceSettingsState();
-}
-
-class _AppearanceSettingsState extends State<AppearanceSettings> {
-  static const Color _defaultColor = Color(0xFF00C897);
-  late Color _displayColor;
-
-  @override
-  void initState() {
-    super.initState();
-    _displayColor = widget.currentPrimaryColor;
-  }
-
-  void _handleColorChange(Color newColor) {
-    setState(() {
-      _displayColor = newColor;
-    });
-    widget.onColorChanged(newColor);
-  }
-
-  void _handleThemeChange(bool value) {
-    widget.onThemeChanged(value);
+  void _handleThemeChange(BuildContext context, bool value) {
+    onThemeChanged(value);
     Navigator.of(context).popUntil((route) => route.isFirst);
   }
 
-  void _showColorPicker(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (ctx) => Dialog(
-        backgroundColor: Theme.of(context).cardColor,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  "Pick Accent Color",
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: Theme.of(context).colorScheme.onSurface,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                SizedBox(
-                  height: 250,
-                  width: 250,
-                  child: ColorWheelPicker(
-                    initialColor: _displayColor,
-                    onColorChanged: _handleColorChange,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    TextButton.icon(
-                      icon: const Icon(Icons.restore, size: 18),
-                      label: const Text("Reset"),
-                      style: TextButton.styleFrom(foregroundColor: Colors.grey),
-                      onPressed: () {
-                        _handleColorChange(_defaultColor);
-                        Navigator.pop(ctx);
-                      },
-                    ),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _displayColor,
-                        foregroundColor: Colors.black,
-                      ),
-                      onPressed: () => Navigator.pop(ctx),
-                      child: const Text("Done"),
-                    ),
-                  ],
-                ),
-              ],
-            ),
+  // A quick helper to draw the 3 theme color circles
+  Widget _buildColorCircle(Color color) {
+    return Container(
+      width: 24,
+      height: 24,
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white, width: 2),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.2),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
           ),
-        ),
+        ],
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final isDark = !widget.isLightMode;
+    final isDark = !isLightMode;
 
     return ResponsiveSettingsGrid(
       children: [
@@ -115,30 +53,27 @@ class _AppearanceSettingsState extends State<AppearanceSettings> {
           subtitle: isDark ? "On" : "Off",
           trailing: Switch(
             value: isDark,
-            activeColor: _displayColor,
-            onChanged: (val) => _handleThemeChange(!val),
+            activeColor: currentPrimaryColor,
+            onChanged: (val) => _handleThemeChange(context, !val),
           ),
-          onTap: () => _handleThemeChange(!isDark),
         ),
 
-        // --- TILE 2: ACCENT COLOR ---
+        // --- TILE 2: APP THEME (STATIC) ---
         GradientSettingsTile(
           icon: Icons.palette_outlined,
-          title: "Accent Color",
-          subtitle: "Tap to change",
-          trailing: Container(
-            width: 30,
-            height: 30,
-            decoration: BoxDecoration(
-              color: _displayColor,
-              shape: BoxShape.circle,
-              border: Border.all(color: Colors.white, width: 2),
-              boxShadow: [
-                BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 4),
-              ],
-            ),
+          title: "App Theme",
+          subtitle: "Axis Default Palette",
+          // By leaving out the onTap parameter, the tile becomes completely static (No arrow, no clicks)
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildColorCircle(const Color(0xFF00C897)), // Teal
+              const SizedBox(width: 4),
+              _buildColorCircle(Colors.orangeAccent), // Orange
+              const SizedBox(width: 4),
+              _buildColorCircle(Colors.redAccent), // Red
+            ],
           ),
-          onTap: () => _showColorPicker(context),
         ),
       ],
     );

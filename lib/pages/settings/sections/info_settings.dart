@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
-import '../widgets/settings_widgets.dart';
-import '../dialogs/about_dialog.dart';
+import '../widgets/settings_format.dart';
 
 class InfoSettings extends StatelessWidget {
   final String appVersion;
@@ -10,20 +9,18 @@ class InfoSettings extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        GradientSettingsTile(
-          icon: Icons.info_outline,
-          title: "About Axis",
-          subtitle: "View licenses and app info",
-          onTap: () => showAxisAboutDialog(context, appVersion),
-        ),
-        GradientSettingsTile(
-          icon: Icons.developer_mode,
-          title: "App Version",
-          subtitle: "v$appVersion",
-          onTap:
-              () {}, // Keep empty for ripple, or set null to disable completely
-          trailing: const SizedBox.shrink(), // This hides the arrow
+        const SettingsHeader(title: "INFO"),
+        ResponsiveSettingsGrid(
+          children: [
+            GradientSettingsTile(
+              icon: Icons.developer_mode,
+              title: "App Version",
+              subtitle: "v$appVersion",
+              trailing: const SizedBox.shrink(), // This hides the arrow
+            ),
+          ],
         ),
       ],
     );

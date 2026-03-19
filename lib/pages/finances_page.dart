@@ -18,6 +18,9 @@ class _FinancesTabState extends State<FinancesTab> {
   final String _uid = FirebaseAuth.instance.currentUser?.uid ?? "";
   Map<String, List<String>> _userCategories = {};
 
+  // Tracks if the FAB menu is open
+  bool _isFabMenuOpen = false;
+
   @override
   void initState() {
     super.initState();
@@ -308,11 +311,29 @@ class _FinancesTabState extends State<FinancesTab> {
         );
       }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("Unable to open document scanner.")),
         );
+      }
     }
+  }
+
+  // Opens the exact same form, just passes null for the image path!
+  void _openManualEntryModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
+      ),
+      builder: (context) => _LogReceiptForm(
+        imagePath: null,
+        uid: _uid,
+        categories: _userCategories,
+      ),
+    );
   }
 
   @override
@@ -323,8 +344,8 @@ class _FinancesTabState extends State<FinancesTab> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(
+            const Padding(
+              padding: EdgeInsets.only(
                 left: 24.0,
                 right: 24.0,
                 top: 20,
@@ -405,19 +426,21 @@ class _FinancesTabState extends State<FinancesTab> {
                     .collection('finances')
                     .snapshots(),
                 builder: (context, snapshot) {
-                  if (!snapshot.hasData)
+                  if (!snapshot.hasData) {
                     return const Center(
                       child: CircularProgressIndicator(
                         color: Color(0xFF00C897),
                       ),
                     );
-                  if (snapshot.data!.docs.isEmpty)
+                  }
+                  if (snapshot.data!.docs.isEmpty) {
                     return const Center(
                       child: Text(
                         "No receipts logged yet.",
                         style: TextStyle(color: Colors.white54, fontSize: 16),
                       ),
                     );
+                  }
 
                   var docs = snapshot.data!.docs.toList();
                   docs.sort((a, b) {
@@ -445,15 +468,61 @@ class _FinancesTabState extends State<FinancesTab> {
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        heroTag: 'finances_fab',
-        onPressed: _openAddReceiptModal,
-        backgroundColor: const Color(0xFF00C897),
-        icon: const Icon(Icons.document_scanner, color: Colors.black),
-        label: const Text(
-          "Scan Receipt",
-          style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
-        ),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (_isFabMenuOpen) ...[
+            FloatingActionButton.extended(
+              heroTag: 'manual_fab',
+              onPressed: () {
+                setState(() => _isFabMenuOpen = false);
+                _openManualEntryModal();
+              },
+              backgroundColor: const Color(0xFF1E1E1E),
+              icon: const Icon(Icons.edit, color: Color(0xFF00C897)),
+              label: const Text(
+                "Manual Entry",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            FloatingActionButton.extended(
+              heroTag: 'scan_fab',
+              onPressed: () {
+                setState(() => _isFabMenuOpen = false);
+                _openAddReceiptModal();
+              },
+              backgroundColor: const Color(0xFF1E1E1E),
+              icon: const Icon(
+                Icons.document_scanner,
+                color: Color(0xFF00C897),
+              ),
+              label: const Text(
+                "Scan Receipt",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(height: 15),
+          ],
+          FloatingActionButton(
+            heroTag: 'finances_fab_main',
+            onPressed: () => setState(() => _isFabMenuOpen = !_isFabMenuOpen),
+            backgroundColor: Theme.of(context).colorScheme.primary,
+            child: Icon(
+              _isFabMenuOpen ? Icons.close : Icons.add,
+              color: Theme.of(context).brightness == Brightness.dark
+                  ? Colors.black
+                  : Colors.white,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -469,7 +538,9 @@ class _FinancesTabState extends State<FinancesTab> {
           int.parse(parts[1]),
         );
       }
-    } catch (e) {}
+    } catch (e) {
+      // Ignored catch
+    }
     return DateTime.now();
   }
 }
@@ -536,7 +607,6 @@ class _ReceiptTileState extends State<_ReceiptTile> {
                     ),
                   ),
                 ),
-
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
@@ -683,7 +753,6 @@ class _ReceiptTileState extends State<_ReceiptTile> {
                                     fontSize: 10,
                                     fontWeight: FontWeight.bold,
                                   ),
-                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ),
                             ),
@@ -694,21 +763,38 @@ class _ReceiptTileState extends State<_ReceiptTile> {
                 }
               }),
 
-            const SizedBox(height: 16),
-
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  "Receipt: ${widget.data['date']}",
-                  style: const TextStyle(color: Colors.white54, fontSize: 12),
-                ),
-                if (_isExpanded)
+            // ==========================================
+            // BOTTOM ROW (Receipt Date & Logged Date)
+            // ==========================================
+            Padding(
+              padding: const EdgeInsets.only(top: 12.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  // Always visible: Date from the receipt itself
                   Text(
-                    "Scanned: ${_formatTimestamp(widget.data['timestamp'])}",
-                    style: const TextStyle(color: Colors.white38, fontSize: 11),
+                    widget.data['date']?.toString() ?? "",
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-              ],
+
+                  // Only visible when expanded: Exact log timestamp
+                  if (_isExpanded)
+                    Text(
+                      "Logged ${_formatTimestamp(widget.data['timestamp'])}",
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 10,
+                      ),
+                    )
+                  else
+                    const SizedBox(), // Maintains Row alignment when closed
+                ],
+              ),
             ),
           ],
         ),
@@ -718,15 +804,15 @@ class _ReceiptTileState extends State<_ReceiptTile> {
 }
 
 // =========================================================
-// ADD RECEIPT MODAL FORM (ITEMIZED AI)
+// AI RECEIPT SCANNER & MANUAL ENTRY MODAL
 // =========================================================
 class _LogReceiptForm extends StatefulWidget {
-  final String imagePath;
+  final String? imagePath; // Made nullable for manual entry
   final String uid;
   final Map<String, List<String>> categories;
 
   const _LogReceiptForm({
-    required this.imagePath,
+    this.imagePath,
     required this.uid,
     required this.categories,
   });
@@ -745,12 +831,18 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
 
   List<Map<String, dynamic>> _parsedItems = [];
   bool _isScanningAI = false;
-  bool _isDuplicate = false; // Tracks if this exact receipt already exists
+  bool _isDuplicate = false;
 
   @override
   void initState() {
     super.initState();
-    _scanReceiptWithAI();
+    // Only attempt an AI scan if an image was actually provided
+    if (widget.imagePath != null) {
+      _scanReceiptWithAI();
+    } else {
+      _setDateFallback();
+      _setTimeFallback();
+    }
   }
 
   Future<void> _scanReceiptWithAI() async {
@@ -761,7 +853,7 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
       if (apiKey.isEmpty) throw Exception("API Key not found in .env");
 
       final model = GenerativeModel(model: 'gemini-2.5-flash', apiKey: apiKey);
-      final imageBytes = await File(widget.imagePath).readAsBytes();
+      final imageBytes = await File(widget.imagePath!).readAsBytes();
 
       String categoryRules = jsonEncode(widget.categories);
 
@@ -814,22 +906,23 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
             _taxController.text = data['tax']?.toString() ?? "";
             _totalController.text = data['total']?.toString() ?? "";
 
-            if (data['date'] != null && data['date'].toString().isNotEmpty)
+            if (data['date'] != null && data['date'].toString().isNotEmpty) {
               _dateController.text = data['date'];
-            else
+            } else {
               _setDateFallback();
+            }
 
-            if (data['time'] != null && data['time'].toString().isNotEmpty)
+            if (data['time'] != null && data['time'].toString().isNotEmpty) {
               _timeController.text = data['time'];
-            else
+            } else {
               _setTimeFallback();
+            }
 
             if (data['items'] != null) {
               _parsedItems = List<Map<String, dynamic>>.from(data['items']);
             }
           });
 
-          // --- DUPLICATE CHECK LOGIC ---
           await _checkForDuplicateReceipt(
             _storeController.text.trim(),
             _dateController.text.trim(),
@@ -839,13 +932,14 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
       }
     } catch (e) {
       debugPrint("AI Scanning Failed: $e");
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text("Axis AI is unable to extract the data right now."),
             backgroundColor: Colors.redAccent,
           ),
         );
+      }
       _setDateFallback();
       _setTimeFallback();
     }
@@ -860,7 +954,6 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
     if (store.isEmpty || date.isEmpty) return;
     double scannedTotal = double.tryParse(totalStr.replaceAll('\$', '')) ?? 0.0;
 
-    // Ask Firebase if a receipt from this store exists
     final query = await FirebaseFirestore.instance
         .collection('users')
         .doc(widget.uid)
@@ -870,7 +963,6 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
 
     bool foundDuplicate = false;
 
-    // Check if the Date and Total match exactly
     for (var doc in query.docs) {
       var existingData = doc.data();
       double existingTotal = (existingData['total'] ?? 0.0) * 1.0;
@@ -911,6 +1003,8 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
   }
 
   void _showFullImage() {
+    if (widget.imagePath == null) return;
+
     showDialog(
       context: context,
       builder: (context) => Dialog(
@@ -925,7 +1019,7 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
               maxScale: 4.0,
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
-                child: Image.file(File(widget.imagePath)),
+                child: Image.file(File(widget.imagePath!)),
               ),
             ),
             IconButton(
@@ -980,9 +1074,10 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              "Verify Receipt",
-              style: TextStyle(
+            Text(
+              // Title changes based on if an image was passed or not
+              widget.imagePath == null ? "Manual Entry" : "Verify Receipt",
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 24,
                 fontWeight: FontWeight.bold,
@@ -995,59 +1090,62 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    GestureDetector(
-                      onTap: _showFullImage,
-                      child: Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          Container(
-                            height: 100,
-                            width: double.infinity,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(12),
-                              image: DecorationImage(
-                                image: FileImage(File(widget.imagePath)),
-                                fit: BoxFit.cover,
-                                alignment: Alignment.topCenter,
-                                colorFilter: _isScanningAI
-                                    ? ColorFilter.mode(
-                                        Colors.black.withOpacity(0.6),
-                                        BlendMode.darken,
-                                      )
-                                    : null,
+                    // Only render the image preview block if we have an image
+                    if (widget.imagePath != null) ...[
+                      GestureDetector(
+                        onTap: _showFullImage,
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            Container(
+                              height: 100,
+                              width: double.infinity,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(12),
+                                image: DecorationImage(
+                                  image: FileImage(File(widget.imagePath!)),
+                                  fit: BoxFit.cover,
+                                  alignment: Alignment.topCenter,
+                                  colorFilter: _isScanningAI
+                                      ? ColorFilter.mode(
+                                          Colors.black.withOpacity(0.6),
+                                          BlendMode.darken,
+                                        )
+                                      : null,
+                                ),
                               ),
                             ),
-                          ),
-                          if (_isScanningAI)
-                            const Column(
-                              children: [
-                                CircularProgressIndicator(
-                                  color: Color(0xFF00C897),
-                                ),
-                                SizedBox(height: 10),
-                                Text(
-                                  "Axis AI is extracting the data.",
-                                  style: TextStyle(
+                            if (_isScanningAI)
+                              const Column(
+                                children: [
+                                  CircularProgressIndicator(
                                     color: Color(0xFF00C897),
-                                    fontWeight: FontWeight.bold,
                                   ),
+                                  SizedBox(height: 10),
+                                  Text(
+                                    "Axis AI is extracting the data.",
+                                    style: TextStyle(
+                                      color: Color(0xFF00C897),
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              )
+                            else
+                              const Positioned(
+                                bottom: 8,
+                                right: 8,
+                                child: Icon(
+                                  Icons.zoom_out_map,
+                                  color: Colors.white70,
+                                  size: 20,
                                 ),
-                              ],
-                            )
-                          else
-                            const Positioned(
-                              bottom: 8,
-                              right: 8,
-                              child: Icon(
-                                Icons.zoom_out_map,
-                                color: Colors.white70,
-                                size: 20,
                               ),
-                            ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 20),
+                      const SizedBox(height: 20),
+                    ],
 
                     Row(
                       children: [
@@ -1326,40 +1424,33 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
                       ),
                       icon: const Icon(Icons.add, color: Color(0xFF00C897)),
                       label: const Text(
-                        "Add Missing Item",
+                        "Add Item",
                         style: TextStyle(color: Color(0xFF00C897)),
                       ),
                     ),
+                    const SizedBox(height: 30),
                   ],
                 ),
               ),
             ),
 
-            const SizedBox(height: 15),
-
-            // --- DUPLICATE WARNING BANNER ---
             if (_isDuplicate)
               Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
                 margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: Colors.redAccent.withOpacity(0.1),
+                  color: Colors.orangeAccent.withOpacity(0.1),
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.redAccent.withOpacity(0.5)),
+                  border: Border.all(color: Colors.orangeAccent),
                 ),
                 child: const Row(
                   children: [
-                    Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
+                    Icon(Icons.warning_amber_rounded, color: Colors.orange),
                     SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        "This looks like a duplicate. You already have a receipt logged for this store on this date with this total.",
-                        style: TextStyle(
-                          color: Colors.redAccent,
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                        ),
+                        "A receipt from this store on this date with this total already exists. Saving will create a duplicate.",
+                        style: TextStyle(color: Colors.orange, fontSize: 12),
                       ),
                     ),
                   ],
@@ -1368,18 +1459,18 @@ class _LogReceiptFormState extends State<_LogReceiptForm> {
 
             SizedBox(
               width: double.infinity,
+              height: 55,
               child: ElevatedButton(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF00C897),
                   foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(vertical: 15),
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(15),
                   ),
                 ),
                 onPressed: _isScanningAI ? null : _saveReceipt,
                 child: Text(
-                  _isScanningAI ? "Scanning..." : "Save to Finances",
+                  _isScanningAI ? "Extracting Data..." : "Save to Finances",
                   style: const TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,

@@ -14,11 +14,6 @@ class TabData {
     TabData(id: 'inventory', iconCodePoint: Icons.inventory_2.codePoint),
     TabData(id: 'stats', iconCodePoint: Icons.bar_chart.codePoint),
     TabData(
-      id: 'morning',
-      iconCodePoint: Icons.wb_sunny.codePoint,
-      isBeta: true,
-    ),
-    TabData(
       id: 'night',
       iconCodePoint: Icons.nights_stay.codePoint,
       isBeta: true,

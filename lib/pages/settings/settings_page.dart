@@ -13,6 +13,9 @@ import 'sections/notifications_settings.dart';
 import 'sections/data_settings.dart';
 import 'sections/info_settings.dart';
 
+// --- Import the new unified tile library ---
+import 'widgets/settings_format.dart';
+
 class SettingsPage extends StatefulWidget {
   final bool isLightMode;
   final Function(bool) onThemeChanged;
@@ -25,7 +28,6 @@ class SettingsPage extends StatefulWidget {
 
   final List<String> knownRooms;
 
-  final VoidCallback onViewAbout;
   final Function(String, bool) onTabToggled;
   final Function(List<TabData>) onTabsReordered;
 
@@ -42,9 +44,8 @@ class SettingsPage extends StatefulWidget {
     required this.onColorChanged,
     required this.currentTabs,
     required this.allPossibleTabs,
-    required this.appVersion,
-    required this.onViewAbout,
     required this.onTabToggled,
+    required this.appVersion,
     required this.onTabsReordered,
     required this.onImportInventory,
     required this.onImportActivity,
@@ -226,205 +227,113 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         centerTitle: true,
       ),
-      body: ListView(
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(20),
-        children: [
-          _SettingsTile(
-            icon: Icons.person_outline,
-            title: "Account",
-            subtitle: "Inventories",
-            onTap: () => _pushSubPage("Account", const AccountSettings()),
-          ),
-          const SizedBox(height: 15),
-
-          _SettingsTile(
-            icon: Icons.palette_outlined,
-            title: "Appearance",
-            subtitle: "Theme, Colors",
-            onTap: () => _pushSubPage(
-              "Appearance",
-              AppearanceSettings(
-                isLightMode: widget.isLightMode,
-                onThemeChanged: widget.onThemeChanged,
-                currentPrimaryColor: widget.currentPrimaryColor,
-                onColorChanged: widget.onColorChanged,
-              ),
+        child: ResponsiveSettingsGrid(
+          children: [
+            GradientSettingsTile(
+              icon: Icons.person_outline,
+              title: "Account",
+              subtitle: "Inventories",
+              onTap: () => _pushSubPage("Account", const AccountSettings()),
             ),
-          ),
-          const SizedBox(height: 15),
 
-          _SettingsTile(
-            icon: Icons.view_sidebar_outlined,
-            title: "Navigation Bar",
-            subtitle: "Reorder & Toggle",
-            onTap: () => _pushSubPage(
-              "Navigation Bar",
-              NavBarSettings(
-                orderedTabs: _orderedTabs,
-                activeTabIds: _activeTabIds,
-                onReorder: (newOrder) {
-                  setState(() => _orderedTabs = newOrder);
-                  widget.onTabsReordered(newOrder);
-                },
-                onToggle: (id, active) {
-                  setState(() {
-                    if (active)
-                      _activeTabIds.add(id);
-                    else if (_activeTabIds.length > 1)
-                      _activeTabIds.remove(id);
-                  });
-                  widget.onTabToggled(id, active);
-                },
-              ),
-            ),
-          ),
-          const SizedBox(height: 15),
-
-          _SettingsTile(
-            icon: Icons.home_outlined,
-            title: "Home Page",
-            subtitle: "Layout & Alerts",
-            onTap: () => _pushSubPage(
-              "Home Page",
-              _isLoadingInventories
-                  ? const Center(child: CircularProgressIndicator())
-                  : HomePageSettings(
-                      inventories: _loadedInventories,
-                      runoutMutedMap: _runoutMutedMap,
-                      usageMutedMap: _usageMutedMap,
-                      onReorderInventories: _onReorderInventories,
-                      onToggleRunoutMute: (id, room, val) =>
-                          _onToggleMute('runout', id, room, val),
-                      onToggleUsageMute: (id, room, val) =>
-                          _onToggleMute('usage', id, room, val),
-                    ),
-            ),
-          ),
-          const SizedBox(height: 15),
-
-          _SettingsTile(
-            icon: Icons.notifications_outlined,
-            title: "Notifications",
-            subtitle: "Alerts, Debriefs, Smart Triggers",
-            onTap: () => _pushSubPage(
-              "Notifications",
-              NotificationsSettings(knownRooms: widget.knownRooms),
-            ),
-          ),
-          const SizedBox(height: 15),
-
-          _SettingsTile(
-            icon: Icons.cloud_download_outlined,
-            title: "Data",
-            subtitle: "Import, Export, Reset",
-            onTap: () => _pushSubPage(
-              "Data",
-              DataSettings(
-                onImportInventory: widget.onImportInventory,
-                onImportActivity: widget.onImportActivity,
-                onResetData: widget.onResetData,
-              ),
-            ),
-          ),
-          const SizedBox(height: 15),
-
-          _SettingsTile(
-            icon: Icons.info_outline,
-            title: "Info",
-            subtitle: "v${widget.appVersion}",
-            onTap: () => _pushSubPage(
-              "App Info",
-              InfoSettings(appVersion: widget.appVersion),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SettingsTile extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String? subtitle;
-  final VoidCallback onTap;
-
-  const _SettingsTile({
-    required this.icon,
-    required this.title,
-    this.subtitle,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: Container(
-        height: 70,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
-          gradient: LinearGradient(
-            begin: Alignment.centerLeft,
-            end: Alignment.centerRight,
-            colors: [
-              theme.colorScheme.primary.withOpacity(0.1),
-              theme.colorScheme.primary.withOpacity(0.4),
-            ],
-            stops: const [0.0, 1.0],
-          ),
-          border: Border.all(color: theme.dividerColor.withOpacity(0.1)),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primary.withOpacity(0.15),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(icon, color: theme.colorScheme.primary, size: 20),
-              ),
-              const SizedBox(width: 20),
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                        color: theme.colorScheme.onSurface,
-                      ),
-                    ),
-                    if (subtitle != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        subtitle!,
-                        style: TextStyle(
-                          color: theme.colorScheme.onSurface.withOpacity(0.6),
-                          fontSize: 11,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ],
+            GradientSettingsTile(
+              icon: Icons.palette_outlined,
+              title: "Appearance",
+              subtitle: "Theme, Colors",
+              onTap: () => _pushSubPage(
+                "Appearance",
+                AppearanceSettings(
+                  isLightMode: widget.isLightMode,
+                  onThemeChanged: widget.onThemeChanged,
+                  currentPrimaryColor: widget.currentPrimaryColor,
+                  onColorChanged: widget.onColorChanged,
                 ),
               ),
-              const Icon(
-                Icons.arrow_forward_ios,
-                color: Colors.black,
-                size: 16,
+            ),
+
+            GradientSettingsTile(
+              icon: Icons.view_sidebar_outlined,
+              title: "Navigation Bar",
+              subtitle: "Reorder & Toggle",
+              onTap: () => _pushSubPage(
+                "Navigation Bar",
+                NavBarSettings(
+                  orderedTabs: _orderedTabs,
+                  activeTabIds: _activeTabIds,
+                  onReorder: (newOrder) {
+                    setState(() => _orderedTabs = newOrder);
+                    widget.onTabsReordered(newOrder);
+                  },
+                  onToggle: (id, active) {
+                    setState(() {
+                      if (active)
+                        _activeTabIds.add(id);
+                      else if (_activeTabIds.length > 1)
+                        _activeTabIds.remove(id);
+                    });
+                    widget.onTabToggled(id, active);
+                  },
+                ),
               ),
-            ],
-          ),
+            ),
+
+            GradientSettingsTile(
+              icon: Icons.home_outlined,
+              title: "Home Page",
+              subtitle: "Layout & Alerts",
+              onTap: () => _pushSubPage(
+                "Home Page",
+                _isLoadingInventories
+                    ? const Center(child: CircularProgressIndicator())
+                    : HomePageSettings(
+                        inventories: _loadedInventories,
+                        runoutMutedMap: _runoutMutedMap,
+                        usageMutedMap: _usageMutedMap,
+                        onReorderInventories: _onReorderInventories,
+                        onToggleRunoutMute: (id, room, val) =>
+                            _onToggleMute('runout', id, room, val),
+                        onToggleUsageMute: (id, room, val) =>
+                            _onToggleMute('usage', id, room, val),
+                      ),
+              ),
+            ),
+
+            GradientSettingsTile(
+              icon: Icons.notifications_outlined,
+              title: "Notifications",
+              subtitle: "Alerts, Debriefs, Smart Triggers",
+              onTap: () => _pushSubPage(
+                "Notifications",
+                NotificationsSettings(knownRooms: widget.knownRooms),
+              ),
+            ),
+
+            GradientSettingsTile(
+              icon: Icons.cloud_download_outlined,
+              title: "Data",
+              subtitle: "Import, Export, Reset",
+              onTap: () => _pushSubPage(
+                "Data",
+                DataSettings(
+                  onImportInventory: widget.onImportInventory,
+                  onImportActivity: widget.onImportActivity,
+                  onResetData: widget.onResetData,
+                ),
+              ),
+            ),
+
+            GradientSettingsTile(
+              icon: Icons.info_outline,
+              title: "Info",
+              subtitle: "v${widget.appVersion}",
+              onTap: () => _pushSubPage(
+                "App Info",
+                InfoSettings(appVersion: widget.appVersion),
+              ),
+            ),
+          ],
         ),
       ),
     );

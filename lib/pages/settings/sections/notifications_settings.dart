@@ -4,7 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
-import '../widgets/settings_widgets.dart';
+import '../widgets/settings_format.dart';
 import '../widgets/notification_tile.dart';
 import '../dialogs/trigger_dialog.dart';
 
@@ -953,59 +953,39 @@ class _NotificationsSettingsState extends State<NotificationsSettings> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: Text(
-            "GLOBAL",
-            style: TextStyle(
-              color: theme.colorScheme.primary,
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 1.5,
+        const SettingsHeader(title: "GLOBAL"),
+
+        ResponsiveSettingsGrid(
+          children: [
+            GradientSettingsTile(
+              icon: Icons.group_add,
+              title: "New Invites",
+              subtitle: "Notify when someone adds you",
+              onTap: () => _toggleInviteNotifs(!_inviteNotifsEnabled),
+              trailing: Switch(
+                value: _inviteNotifsEnabled,
+                activeColor: theme.colorScheme.primary,
+                onChanged: _toggleInviteNotifs,
+              ),
             ),
-          ),
+            GradientSettingsTile(
+              icon: Icons.group_remove,
+              title: "Removed Alerts",
+              subtitle: "Notify when removed from an inventory",
+              onTap: () => _toggleRemovedNotifs(!_removedNotifsEnabled),
+              trailing: Switch(
+                value: _removedNotifsEnabled,
+                activeColor: theme.colorScheme.primary,
+                onChanged: _toggleRemovedNotifs,
+              ),
+            ),
+            _buildReportTile(theme),
+          ],
         ),
-
-        GradientSettingsTile(
-          icon: Icons.group_add,
-          title: "New Invites",
-          subtitle: "Notify when someone adds you",
-          onTap: () => _toggleInviteNotifs(!_inviteNotifsEnabled),
-          trailing: Switch(
-            value: _inviteNotifsEnabled,
-            activeColor: theme.colorScheme.primary,
-            onChanged: _toggleInviteNotifs,
-          ),
-        ),
-
-        GradientSettingsTile(
-          icon: Icons.group_remove,
-          title: "Removed Alerts",
-          subtitle: "Notify when removed from an inventory",
-          onTap: () => _toggleRemovedNotifs(!_removedNotifsEnabled),
-          trailing: Switch(
-            value: _removedNotifsEnabled,
-            activeColor: theme.colorScheme.primary,
-            onChanged: _toggleRemovedNotifs,
-          ),
-        ),
-
-        _buildReportTile(theme),
 
         const SizedBox(height: 30),
 
-        Padding(
-          padding: const EdgeInsets.only(bottom: 10),
-          child: Text(
-            "INVENTORIES (Drag to Reorder)",
-            style: TextStyle(
-              color: theme.colorScheme.primary,
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 1.5,
-            ),
-          ),
-        ),
+        const SettingsHeader(title: "INVENTORIES (Drag to Reorder)"),
 
         if (_inventoryOrder.isEmpty)
           Padding(

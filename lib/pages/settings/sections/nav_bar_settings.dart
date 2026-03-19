@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../../models/tab_data.dart';
-import '../widgets/settings_widgets.dart';
+import '../widgets/settings_format.dart';
 
 class NavBarSettings extends StatefulWidget {
   final List<TabData> orderedTabs;
@@ -73,68 +73,50 @@ class _NavBarSettingsState extends State<NavBarSettings> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // --- 1. STARTUP PAGE SECTION ---
-        Padding(
-          padding: const EdgeInsets.only(bottom: 10, left: 4),
-          child: Text(
-            "STARTUP PAGE",
-            style: TextStyle(
-              color: theme.colorScheme.primary,
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 1.5,
-            ),
-          ),
-        ),
+        const SettingsHeader(title: "STARTUP PAGE"),
 
-        GradientSettingsTile(
-          icon: Icons.home_filled,
-          title: "Open App To",
-          subtitle: "Select your default home page",
-          onTap: () {},
-          trailing: DropdownButtonHideUnderline(
-            child: DropdownButton<String>(
-              value: currentSelection,
-              icon: Icon(
-                Icons.arrow_drop_down,
-                color: theme.colorScheme.primary,
-              ),
-              dropdownColor: theme.cardColor,
-              borderRadius: BorderRadius.circular(15),
-              style: TextStyle(
-                color: theme.colorScheme.onSurface,
-                fontWeight: FontWeight.bold,
-              ),
-              items: availableStartupTabs.map((tab) {
-                return DropdownMenuItem<String>(
-                  value: tab.id,
-                  child: Text(
-                    tab.id.toUpperCase(),
-                    style: TextStyle(color: theme.colorScheme.onSurface),
+        ResponsiveSettingsGrid(
+          children: [
+            GradientSettingsTile(
+              icon: Icons.home_filled,
+              title: "Open App To",
+              subtitle: "Select your default home page",
+              onTap: () {},
+              trailing: DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: currentSelection,
+                  icon: Icon(
+                    Icons.arrow_drop_down,
+                    color: theme.colorScheme.primary,
                   ),
-                );
-              }).toList(),
-              onChanged: (String? newValue) {
-                if (newValue != null) _updateDefaultTab(newValue);
-              },
+                  dropdownColor: theme.cardColor,
+                  borderRadius: BorderRadius.circular(15),
+                  style: TextStyle(
+                    color: theme.colorScheme.onSurface,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  items: availableStartupTabs.map((tab) {
+                    return DropdownMenuItem<String>(
+                      value: tab.id,
+                      child: Text(
+                        tab.id.toUpperCase(),
+                        style: TextStyle(color: theme.colorScheme.onSurface),
+                      ),
+                    );
+                  }).toList(),
+                  onChanged: (String? newValue) {
+                    if (newValue != null) _updateDefaultTab(newValue);
+                  },
+                ),
+              ),
             ),
-          ),
+          ],
         ),
 
         const SizedBox(height: 25),
 
         // --- 2. LAYOUT SECTION ---
-        Padding(
-          padding: const EdgeInsets.only(bottom: 10, left: 4),
-          child: Text(
-            "NAVIGATION BAR LAYOUT",
-            style: TextStyle(
-              color: theme.colorScheme.primary,
-              fontSize: 12,
-              fontWeight: FontWeight.bold,
-              letterSpacing: 1.5,
-            ),
-          ),
-        ),
+        const SettingsHeader(title: "NAVIGATION BAR LAYOUT"),
 
         Container(
           padding: const EdgeInsets.all(15),

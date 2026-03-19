@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import '../widgets/settings_widgets.dart';
+import '../widgets/settings_format.dart';
 import '../dialogs/csv_formats_dialog.dart';
 
 class DataSettings extends StatelessWidget {
@@ -26,7 +26,12 @@ class DataSettings extends StatelessWidget {
           children: [
             Icon(Icons.warning_amber_rounded, color: theme.colorScheme.error),
             const SizedBox(width: 10),
-            const Text("Clear Current Inventory"),
+            const Expanded(
+              child: Text(
+                "Clear Current Inventory",
+                style: TextStyle(fontSize: 18),
+              ),
+            ),
           ],
         ),
         content: Text(
@@ -63,31 +68,36 @@ class DataSettings extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        GradientSettingsTile(
-          icon: Icons.download,
-          title: "Upload Inventory",
-          subtitle: "Import your items from CSV",
-          onTap: onImportInventory,
-        ),
-        GradientSettingsTile(
-          icon: Icons.history,
-          title: "Upload Activity Log",
-          subtitle: "Import usage history from CSV",
-          onTap: onImportActivity,
-        ),
-        GradientSettingsTile(
-          icon: Icons.info_outline,
-          title: "View CSV Formats",
-          subtitle: "See required column layouts",
-          onTap: () => showCSVFormatsDialog(context),
-        ),
-        // Removed the SizedBox here to eliminate the gap
-        GradientSettingsTile(
-          icon: Icons.delete_sweep,
-          title: "Clear Current Inventory",
-          subtitle: "Remove items & history from this list only",
-          onTap: () => _showResetConfirmation(context),
+        const SettingsHeader(title: "Inventory Data"),
+        ResponsiveSettingsGrid(
+          children: [
+            GradientSettingsTile(
+              icon: Icons.download,
+              title: "Upload Inventory",
+              subtitle: "Import your items from CSV",
+              onTap: onImportInventory,
+            ),
+            GradientSettingsTile(
+              icon: Icons.history,
+              title: "Upload Activity Log",
+              subtitle: "Import usage history from CSV",
+              onTap: onImportActivity,
+            ),
+            GradientSettingsTile(
+              icon: Icons.info_outline,
+              title: "View CSV Formats",
+              subtitle: "See required column layouts",
+              onTap: () => showCSVFormatsDialog(context),
+            ),
+            GradientSettingsTile(
+              icon: Icons.delete_sweep,
+              title: "Clear Current Inventory",
+              subtitle: "Remove items & history from this list only",
+              onTap: () => _showResetConfirmation(context),
+            ),
+          ],
         ),
       ],
     );
